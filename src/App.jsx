@@ -95,6 +95,32 @@ function DecCell({ value, onChange, suffix }) {
   );
 }
 
+// ---------- dashboard aggregation ----------
+function aggWarehouse(prods, open, mvs, config) {
+  let openVal = 0, closeVal = 0, costVal = 0, neg = 0, withStock = 0;
+  const mvTot = {}; MOVES.forEach((m) => (mvTot[m.key] = 0));
+  const list = [];
+  prods.forEach((p) => {
+    const o = open[p.code] || 0;
+    let net = 0;
+    const mv = mvs[p.code];
+    if (mv) MOVES.forEach((m) => {
+      const c = mv[m.key];
+      if (c) { const t = toPcs(c.c, c.b, c.p, p.pcsCase, p.pcsOuter); mvTot[m.key] += t; net += m.sign * t; }
+    });
+    const cl = o + net;
+    openVal += o * p.mrp; closeVal += cl * p.mrp;
+    costVal += cl * skuPricing(p.mrp, config.perSku[p.code] || {}, config.ourMargin).cost;
+    if (cl < 0) neg++;
+    if (cl > 0) withStock++;
+    const out = mv && mv.out ? toPcs(mv.out.c, mv.out.b, mv.out.p, p.pcsCase, p.pcsOuter) : 0;
+    list.push({ code: p.code, desc: p.desc, cl, val: cl * p.mrp, out });
+  });
+  const topOut = list.filter((x) => x.out > 0).sort((a, b) => b.out - a.out).slice(0, 5);
+  const topVal = list.filter((x) => x.val > 0).sort((a, b) => b.val - a.val).slice(0, 5);
+  return { openVal, closeVal, costVal, mvTot, neg, withStock, total: prods.length, topOut, topVal };
+}
+
 // ---------- login screen ----------
 function Login() {
   const [email, setEmail] = useState("");
@@ -411,7 +437,7 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState("entry");       // entry | report | config
+  const [tab, setTab] = useState("dashboard");   // dashboard | entry | stocktake | report | monthly | config | users
   const [showZero, setShowZero] = useState(true);
   const [config, setConfig] = useState(CONFIG_DEFAULT);
 
@@ -724,6 +750,76 @@ export default function App() {
     return { counted, matched, short, excess, shortPcs, excessPcs, diffVal };
   }, [products, counts, closingPcs]);
 
+  // ---- dashboard data (per warehouse or consolidated) ----
+  const [dashWh, setDashWh] = useState("ALL");
+  const [dash, setDash] = useState(null);   // [{w, ...agg}]
+  useEffect(() => {
+    if (tab !== "dashboard" || !profile || allowedWh.length === 0) return;
+    const targets = dashWh === "ALL" ? allowedWh : allowedWh.includes(dashWh) ? [dashWh] : allowedWh;
+    let alive = true;
+    (async () => {
+      setDash(null);
+      try {
+        const prev = addDays(date, -1);
+        const results = [];
+        for (const w of targets) {
+          const m = await kvGetMany([prodKey(w), openKey(w, date), mvKey(w, date), openKey(w, prev), mvKey(w, prev)]);
+          const prods = m[prodKey(w)] || [];
+          let open = m[openKey(w, date)];
+          if (!open) {
+            open = {};
+            const pm = m[mvKey(w, prev)], po = m[openKey(w, prev)];
+            if (pm || po) prods.forEach((pr) => {
+              const o = po && po[pr.code] != null ? po[pr.code] : 0;
+              let net = 0;
+              const mv = pm && pm[pr.code];
+              if (mv) MOVES.forEach((mm) => { const c = mv[mm.key]; if (c) net += mm.sign * toPcs(c.c, c.b, c.p, pr.pcsCase, pr.pcsOuter); });
+              open[pr.code] = o + net;
+            });
+          }
+          results.push({ w, ...aggWarehouse(prods, open, m[mvKey(w, date)] || {}, config) });
+        }
+        if (alive) setDash(results);
+      } catch (e) { setDbError(e.message || String(e)); if (alive) setDash([]); }
+    })();
+    return () => { alive = false; };
+  }, [tab, dashWh, date, profile, allowedWh, config]);
+
+  // ---- monthly report data ----
+  const [month, setMonth] = useState(todayStr().slice(0, 7));
+  const [monthly, setMonthly] = useState(null);  // {baseOpen, baseDate, sums, days}
+  useEffect(() => {
+    if (tab !== "monthly" || !products || !wh) return;
+    let alive = true;
+    (async () => {
+      setMonthly(null);
+      try {
+        const [mvRows, opRows] = await Promise.all([
+          kvGetLike(`cad:mv:${wh}:${month}-%`),
+          kvGetLike(`cad:open:${wh}:${month}-%`),
+        ]);
+        if (!alive) return;
+        opRows.sort((a, b) => (a.key < b.key ? -1 : 1));
+        const baseDate = opRows.length ? opRows[0].key.slice(-10) : null;
+        const baseOpen = opRows.length ? opRows[0].value : {};
+        const sums = {}; const days = new Set();
+        mvRows.forEach((r) => {
+          const d = r.key.slice(-10);
+          if (baseDate && d < baseDate) return;
+          days.add(d);
+          Object.entries(r.value || {}).forEach(([code, mv]) => {
+            const p = prodByCode[code];
+            if (!p || !mv) return;
+            if (!sums[code]) { sums[code] = {}; MOVES.forEach((m) => (sums[code][m.key] = 0)); }
+            MOVES.forEach((m) => { const c = mv[m.key]; if (c) sums[code][m.key] += toPcs(c.c, c.b, c.p, p.pcsCase, p.pcsOuter); });
+          });
+        });
+        setMonthly({ baseOpen, baseDate, sums, days: days.size });
+      } catch (e) { setDbError(e.message || String(e)); if (alive) setMonthly({ baseOpen: {}, baseDate: null, sums: {}, days: 0 }); }
+    })();
+    return () => { alive = false; };
+  }, [tab, wh, month, products, prodByCode]);
+
   // ---- opening stock upload (admin) ----
   const [showUpload, setShowUpload] = useState(false);
   const applyOpening = async (asOn, openMap, newProds, updates) => {
@@ -914,14 +1010,16 @@ export default function App() {
 
       {/* ===== tabs ===== */}
       <div className="tabs">
+        <button className={tab === "dashboard" ? "tab on" : "tab"} onClick={() => setTab("dashboard")}>Dashboard</button>
         <button className={tab === "entry" ? "tab on" : "tab"} onClick={() => setTab("entry")}>Daily Entry</button>
         <button className={tab === "stocktake" ? "tab on" : "tab"} onClick={() => setTab("stocktake")}>Stock Take</button>
         <button className={tab === "report" ? "tab on" : "tab"} onClick={() => setTab("report")}>Stock Report</button>
+        <button className={tab === "monthly" ? "tab on" : "tab"} onClick={() => setTab("monthly")}>Monthly</button>
         <button className={tab === "config" ? "tab on" : "tab"} onClick={() => setTab("config")}>Configuration</button>
         {isAdmin && <button className={tab === "users" ? "tab on" : "tab"} onClick={() => setTab("users")}>Users</button>}
         <div className="spacer" />
         <button className="ghost2" style={{ marginRight: 8 }} onClick={exportAll} title="Download all tabs as one Excel file">⬇ Export</button>
-        {!["config", "stocktake", "users"].includes(tab) && (
+        {!["config", "stocktake", "users", "dashboard", "monthly"].includes(tab) && (
           <div className="savebox">
             {savedAt && <span className="saved">✓ saved {savedAt.toLocaleTimeString()}</span>}
             {!savedAt && <span className="unsaved">unsaved changes</span>}
@@ -930,6 +1028,149 @@ export default function App() {
         )}
         {(tab === "config" || tab === "stocktake") && <span className="saved" style={{ padding: "8px 0" }}>changes save automatically</span>}
       </div>
+
+      {/* ===== dashboard ===== */}
+      {tab === "dashboard" && (() => {
+        const consolidated = dashWh === "ALL";
+        const sum = (f) => (dash || []).reduce((a, x) => a + x[f], 0);
+        const mvSum = (k) => (dash || []).reduce((a, x) => a + x.mvTot[k], 0);
+        const mergeTop = (f, key) => (dash || []).flatMap((x) => x[f].map((t) => ({ ...t, w: x.w }))).sort((a, b) => b[key] - a[key]).slice(0, 5);
+        const topOut = mergeTop("topOut", "out"), topVal = mergeTop("topVal", "val");
+        return (
+          <div className="report">
+            <div className="toolbar" style={{ paddingBottom: 4 }}>
+              <div className="ptitle" style={{ margin: 0, fontSize: 13, color: "#2a2018", fontWeight: 700 }}>
+                {consolidated ? "All Warehouses · Consolidated" : dashWh} — {fmtDate(date)}
+              </div>
+              <div className="spacer" />
+              {allowedWh.length > 1 && (
+                <select value={dashWh} onChange={(e) => setDashWh(e.target.value)}
+                  style={{ padding: "7px 10px", borderRadius: 7, border: "1px solid #d2c2a8", background: "#fff", fontSize: 13 }}>
+                  <option value="ALL">All warehouses (consolidated)</option>
+                  {allowedWh.map((w) => <option key={w} value={w}>{w}</option>)}
+                </select>
+              )}
+            </div>
+            {!dash ? <div className="hint">Loading dashboard…</div> : (
+              <>
+                <div className="rcards">
+                  <div className="rcard"><div className="rl">Closing Stock Value (MRP)</div><div className="rv">{inr(sum("closeVal"))}</div></div>
+                  <div className="rcard"><div className="rl">Stock Value at Cost</div><div className="rv">{inr(sum("costVal"))}</div></div>
+                  <div className="rcard"><div className="rl">Opening Value</div><div className="rv sm" style={{ fontSize: 18 }}>{inr(sum("openVal"))}</div></div>
+                  <div className="rcard"><div className="rl">SKUs in Stock</div><div className="rv">{sum("withStock")}<span className="rsub"> / {sum("total")}</span></div></div>
+                  <div className="rcard"><div className="rl">Negative Stock Items</div><div className="rv" style={{ color: sum("neg") > 0 ? "#b3261e" : "#1b7f4d" }}>{sum("neg")}</div></div>
+                </div>
+                <div className="rcards" style={{ paddingTop: 0 }}>
+                  {MOVES.map((m) => (
+                    <div className="rcard" key={m.key}><div className="rl">{m.label} (pcs)</div><div className="rv sm" style={{ color: m.color, fontSize: 20 }}>{mvSum(m.key)}</div></div>
+                  ))}
+                </div>
+                <div className="panelgrid">
+                  <div className="panel">
+                    <div className="ptitle">Top 5 — Today's Stock Out</div>
+                    {topOut.length === 0 && <div className="dim" style={{ fontSize: 12 }}>No outward movement today.</div>}
+                    {topOut.map((t) => (
+                      <div className="prow" key={t.w + t.code}>
+                        <span>{t.desc}{consolidated && <span className="dim"> · {t.w}</span>}</span><b>{t.out} pcs</b>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="panel">
+                    <div className="ptitle">Top 5 — Holdings by Value (MRP)</div>
+                    {topVal.map((t) => (
+                      <div className="prow" key={t.w + t.code}>
+                        <span>{t.desc}{consolidated && <span className="dim"> · {t.w}</span>}</span><b>{inr(t.val)}</b>
+                      </div>
+                    ))}
+                  </div>
+                  {consolidated && dash.length > 1 && (
+                    <div className="panel">
+                      <div className="ptitle">By Warehouse</div>
+                      {dash.map((x) => (
+                        <div className="prow" key={x.w}>
+                          <span>{x.w}<span className="dim"> · in {x.mvTot.in} / out {x.mvTot.out + x.mvTot.whole + x.mvTot.retail} pcs</span></span>
+                          <b>{inr(x.closeVal)}</b>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* ===== monthly report ===== */}
+      {tab === "monthly" && (
+        <div className="report">
+          <div className="toolbar" style={{ paddingBottom: 4 }}>
+            <div className="ptitle" style={{ margin: 0, fontSize: 13, color: "#2a2018", fontWeight: 700 }}>
+              Monthly Movement — {wh}
+            </div>
+            <div className="spacer" />
+            <input type="month" value={month} onChange={(e) => setMonth(e.target.value)}
+              style={{ padding: "7px 10px", borderRadius: 7, border: "1px solid #d2c2a8", background: "#fff", fontSize: 13 }} />
+          </div>
+          {!monthly ? <div className="hint">Loading month…</div> : (() => {
+            const ps = products || [];
+            const rowsM = ps.map((p) => {
+              const o = monthly.baseOpen[p.code] || 0;
+              const s = monthly.sums[p.code] || {};
+              let net = 0;
+              MOVES.forEach((m) => { net += m.sign * (s[m.key] || 0); });
+              return { p, o, s, net, cl: o + net };
+            }).filter((r) => r.o !== 0 || r.net !== 0);
+            const tot = (f) => rowsM.reduce((a, r) => a + (r.s[f] || 0), 0);
+            return (
+              <>
+                <div className="hint" style={{ paddingTop: 6 }}>
+                  Opening as on {monthly.baseDate ? fmtDate(monthly.baseDate) : "—"} · {monthly.days} day(s) with saved entries this month · showing products with stock or movement.
+                </div>
+                <div className="gridwrap">
+                  <table className="grid">
+                    <thead>
+                      <tr>
+                        <th className="stick code">Code</th>
+                        <th className="stick desc">Product</th>
+                        <th className="num">Opening Pcs</th>
+                        {MOVES.map((m) => <th key={m.key} className="num" style={{ color: m.color }}>{m.label}</th>)}
+                        <th className="num">Net Pcs</th>
+                        <th className="grp closing">Closing C·B·P</th>
+                        <th className="num closing">Closing Pcs</th>
+                        <th className="num">Value (MRP)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rowsM.map(({ p, o, s, net, cl }) => {
+                        const cd = fromPcs(cl, p.pcsCase, p.pcsOuter);
+                        return (
+                          <tr key={p.code} className={cl < 0 ? "rneg" : ""}>
+                            <td className="stick code mono">{p.code}</td>
+                            <td className="stick desc">{p.desc}</td>
+                            <td className="num dim">{o}</td>
+                            {MOVES.map((m) => <td key={m.key} className="num dim">{s[m.key] || ""}</td>)}
+                            <td className={"num " + (net < 0 ? "negtxt" : net > 0 ? "oktxt" : "dim")}>{net !== 0 ? (net > 0 ? "+" : "") + net : ""}</td>
+                            <td className={"cbp closing" + (cl < 0 ? " negtxt" : "")}>{cd.c}·{cd.b}·{cd.p}</td>
+                            <td className={"num closing" + (cl < 0 ? " negtxt" : "")}>{cl}</td>
+                            <td className="num">{inr(cl * p.mrp)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="footbar">
+                  <div><b>{rowsM.length}</b> products with stock/movement</div>
+                  <div className="ftot">
+                    {MOVES.map((m) => <span key={m.key} style={{ color: m.color }}>{m.label}: <b>{tot(m.key)}</b> pcs</span>)}
+                  </div>
+                </div>
+              </>
+            );
+          })()}
+        </div>
+      )}
 
       {/* ===== entry ===== */}
       {tab === "entry" && (
@@ -1380,6 +1621,12 @@ const CSS = `
 .ftot { display:flex; gap:14px; flex-wrap:wrap; }
 
 .report { padding:8px 4px; }
+.panelgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:12px; padding:4px 18px 18px; }
+.panel { background:#fff; border:1px solid #d2c2a8; border-radius:10px; padding:13px 16px; }
+.ptitle { font-size:10.5px; text-transform:uppercase; letter-spacing:1px; color:#9a8a72; margin-bottom:9px; }
+.prow { display:flex; justify-content:space-between; gap:10px; font-size:12.5px; padding:5px 0; border-bottom:1px dashed #f0e8d8; }
+.prow:last-child { border-bottom:none; }
+.prow span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .rcards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; padding:10px 18px 16px; }
 .rcard { background:#fff; border:1px solid #d2c2a8; border-radius:10px; padding:13px 15px; }
 .rl { font-size:10.5px; text-transform:uppercase; letter-spacing:1px; color:#9a8a72; margin-bottom:5px; }
