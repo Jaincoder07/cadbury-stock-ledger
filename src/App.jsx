@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useDeferredValue } from "react";
 import { supabase, kvGetMany, kvSet, kvSetBg, kvGetLike, kvGetRange, kvUpsertMany, kvDeleteMany, onStorageError } from "./storage";
 import * as XLSX from "xlsx";
 
@@ -107,7 +107,11 @@ function DecCell({ value, onChange, suffix }) {
 // rolled forward through every saved day's movements since (unlimited history,
 // fetched with two small ranged queries).
 async function resolveOpening(whName, d, prods) {
-  const opens = await kvGetRange(openKey(whName, "0000-00-00"), openKey(whName, d));
+  // both ranges fetched in parallel — one round trip's latency instead of two
+  const [opens, mvAll] = await Promise.all([
+    kvGetRange(openKey(whName, "0000-00-00"), openKey(whName, d)),
+    kvGetRange(mvKey(whName, "0000-00-00"), mvKey(whName, addDays(d, -1))),
+  ]);
   if (!opens.length) return {};
   opens.sort((a, b) => (a.key < b.key ? 1 : -1));   // newest first
   const base = opens[0];
@@ -116,7 +120,7 @@ async function resolveOpening(whName, d, prods) {
   const open = { ...base.value };
   const byCode = {};
   prods.forEach((p) => (byCode[p.code] = p));
-  const mvRows = await kvGetRange(mvKey(whName, baseDate), mvKey(whName, addDays(d, -1)));
+  const mvRows = mvAll.filter((r) => r.key.slice(-10) >= baseDate);
   mvRows.forEach((r) => {
     Object.entries(r.value || {}).forEach(([code, row]) => {
       const pr = byCode[code];
@@ -704,8 +708,10 @@ export default function App() {
   const loadDay = useCallback(async (whName, d, prods) => {
     if (!prods) return;
     try {
-      const m = await kvGetMany([mvKey(whName, d), countKey(whName, d)]);
-      const open = await resolveOpening(whName, d, prods);
+      const [m, open] = await Promise.all([
+        kvGetMany([mvKey(whName, d), countKey(whName, d)]),
+        resolveOpening(whName, d, prods),
+      ]);
       setOpening(open);
       setMoves(m[mvKey(whName, d)] || {});
       setCounts(m[countKey(whName, d)] || {});
@@ -772,10 +778,11 @@ export default function App() {
     setSaving(false);
   };
 
-  // ---- filtered rows ----
+  // ---- filtered rows (deferred query keeps typing responsive on large tables) ----
+  const deferredQuery = useDeferredValue(query);
   const rows = useMemo(() => {
     if (!products) return [];
-    const q = query.trim().toLowerCase();
+    const q = deferredQuery.trim().toLowerCase();
     return products.filter((p) => {
       if (q && !(p.desc.toLowerCase().includes(q) || p.code.toLowerCase().includes(q))) return false;
       if (!showZero && tab !== "config") {
@@ -785,7 +792,7 @@ export default function App() {
       }
       return true;
     });
-  }, [products, query, showZero, moves, opening, tab]);
+  }, [products, deferredQuery, showZero, moves, opening, tab]);
 
   // ---- day totals ----
   const totals = useMemo(() => {
@@ -834,13 +841,13 @@ export default function App() {
     (async () => {
       setDash(null);
       try {
-        const results = [];
-        for (const w of targets) {
+        // all warehouses fetched in parallel
+        const results = await Promise.all(targets.map(async (w) => {
           const m = await kvGetMany([prodKey(w), mvKey(w, date)]);
           const prods = m[prodKey(w)] || [];
           const open = await resolveOpening(w, date, prods);
-          results.push({ w, ...aggWarehouse(prods, open, m[mvKey(w, date)] || {}, config) });
-        }
+          return { w, ...aggWarehouse(prods, open, m[mvKey(w, date)] || {}, config) };
+        }));
         if (alive) setDash(results);
       } catch (e) { setDbError(e.message || String(e)); if (alive) setDash([]); }
     })();
