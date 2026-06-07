@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
-import { supabase, kvGetMany, kvSet, kvSetBg, kvGetLike, kvUpsertMany, kvDeleteMany, migrateLocalStorage, onStorageError } from "./storage";
+import { supabase, kvGetMany, kvSet, kvSetBg, kvGetLike, kvUpsertMany, kvDeleteMany, onStorageError } from "./storage";
 import * as XLSX from "xlsx";
 
 // Seed products from client's actual Cadbury stock sheet:
@@ -73,11 +73,7 @@ const mvKey = (wh, date) => `cad:mv:${wh}:${date}`;       // movements for a war
 const openKey = (wh, date) => `cad:open:${wh}:${date}`;   // opening snapshot (carry)
 const countKey = (wh, date) => `cad:count:${wh}:${date}`; // physical stock-take counts
 
-// storage now lives in Supabase (src/storage.js) — shared across all devices/users.
-// localStorage is only read once, to migrate old single-browser data up to the cloud.
-function localHasOldData() {
-  try { return !!localStorage.getItem(K_PRODUCTS); } catch { return false; }
-}
+// storage lives in Supabase (src/storage.js) — shared across all devices/users.
 
 // ---------- tiny decimal cell (for config: margins, GST %) ----------
 function DecCell({ value, onChange, suffix }) {
@@ -506,12 +502,7 @@ export default function App() {
     (async () => {
       setLoading(true);
       try {
-        let m = await kvGetMany([K_PRODUCTS, K_WAREHOUSES, K_CONFIG, K_USERS]);
-        // first run from a browser that has old localStorage data → migrate it up
-        if (!m[K_PRODUCTS] && localHasOldData()) {
-          await migrateLocalStorage();
-          m = await kvGetMany([K_PRODUCTS, K_WAREHOUSES, K_CONFIG, K_USERS]);
-        }
+        const m = await kvGetMany([K_PRODUCTS, K_WAREHOUSES, K_CONFIG, K_USERS]);
         let p = m[K_PRODUCTS];
         if (!p) {
           p = SEED.map((r) => ({

@@ -59,18 +59,3 @@ export async function kvDeleteMany(keys) {
   if (error) throw error;
 }
 
-// one-time migration: push this browser's old localStorage data up to Supabase
-export async function migrateLocalStorage() {
-  const rows = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (!key || !key.startsWith("cad:")) continue;
-    try {
-      rows.push({ key, value: JSON.parse(localStorage.getItem(key)) });
-    } catch { /* skip unparseable */ }
-  }
-  if (!rows.length) return false;
-  const { error } = await supabase.from("kv").upsert(rows);
-  if (error) throw error;
-  return true;
-}
