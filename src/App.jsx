@@ -51,6 +51,21 @@ const fromPcs = (total, pcsCase, pcsOuter) => {
 // storage keys
 const K_PRODUCTS = "cad:products";
 const K_WAREHOUSES = "cad:warehouses";
+const K_CONFIG = "cad:config";
+
+// pricing defaults (editable in the Configuration tab)
+const CONFIG_DEFAULT = { ourMargin: 5.31, perSku: {} }; // ourMargin in %, fixed across SKUs
+const SKU_DEFAULTS = { margin: 1.12, gst: 5, ws: 15 };  // retailer margin divisor, GST %, wholesale % off MRP
+
+// per-SKU pricing: retail rate, RD (our cost incl GST), cost ex-GST, wholesale rate
+const skuPricing = (mrp, cfg, ourMargin) => {
+  const m = cfg.margin || SKU_DEFAULTS.margin;
+  const retail = mrp / m;
+  const rd = retail / (1 + ourMargin / 100);
+  const cost = rd / (1 + (cfg.gst ?? SKU_DEFAULTS.gst) / 100);
+  const ws = mrp * (1 - (cfg.ws ?? SKU_DEFAULTS.ws) / 100);
+  return { retail, rd, cost, ws };
+};
 const mvKey = (wh, date) => `cad:mv:${wh}:${date}`;       // movements for a warehouse-day
 const openKey = (wh, date) => `cad:open:${wh}:${date}`;   // opening snapshot (carry)
 
@@ -61,6 +76,29 @@ function sGet(key) {
 function sSet(key, val) {
   try { localStorage.setItem(key, JSON.stringify(val)); return true; }
   catch { return false; }
+}
+
+// ---------- tiny decimal cell (for config: margins, GST %) ----------
+function DecCell({ value, onChange, suffix }) {
+  const [v, setV] = useState(value == null ? "" : String(value));
+  useEffect(() => { setV(value == null ? "" : String(value)); }, [value]);
+  return (
+    <span className="dwrap">
+      <input
+        className="ncell dcell"
+        inputMode="decimal"
+        value={v}
+        onChange={(e) => setV(e.target.value.replace(/[^0-9.]/g, ""))}
+        onBlur={() => {
+          const n = parseFloat(v);
+          if (isNaN(n)) { setV(value == null ? "" : String(value)); return; }
+          onChange(n);
+        }}
+        onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+      />
+      {suffix && <span className="dsuf">{suffix}</span>}
+    </span>
+  );
 }
 
 // ---------- tiny numeric cell ----------
@@ -98,8 +136,16 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState("entry");       // entry | report
+  const [tab, setTab] = useState("entry");       // entry | report | config
   const [showZero, setShowZero] = useState(true);
+  const [config, setConfig] = useState(CONFIG_DEFAULT);
+
+  // config is not day-based — persist immediately on every change
+  const saveConfig = (next) => { setConfig(next); sSet(K_CONFIG, next); };
+  const setSkuCfg = (code, field, val) => {
+    const next = { ...config, perSku: { ...config.perSku, [code]: { ...(config.perSku[code] || {}), [field]: val } } };
+    saveConfig(next);
+  };
 
   // ---- load products + warehouses once ----
   useEffect(() => {
@@ -118,6 +164,8 @@ export default function App() {
       if (!w) { w = WAREHOUSES_DEFAULT; sSet(K_WAREHOUSES, w); }
       setWarehouses(w);
       setWh(w[0]);
+      const cfg = sGet(K_CONFIG);
+      if (cfg) setConfig({ ...CONFIG_DEFAULT, ...cfg, perSku: cfg.perSku || {} });
       setLoading(false);
     })();
   }, []);
@@ -213,14 +261,14 @@ export default function App() {
     const q = query.trim().toLowerCase();
     return products.filter((p) => {
       if (q && !(p.desc.toLowerCase().includes(q) || p.code.toLowerCase().includes(q))) return false;
-      if (!showZero) {
+      if (!showZero && tab !== "config") {
         const hasMv = moves[p.code] && Object.values(moves[p.code]).some((c) => c && (c.c || c.b || c.p));
         const o = opening[p.code] || 0;
         if (!hasMv && o === 0) return false;
       }
       return true;
     });
-  }, [products, query, showZero, moves, opening]);
+  }, [products, query, showZero, moves, opening, tab]);
 
   // ---- day totals ----
   const totals = useMemo(() => {
@@ -288,12 +336,16 @@ export default function App() {
       <div className="tabs">
         <button className={tab === "entry" ? "tab on" : "tab"} onClick={() => setTab("entry")}>Daily Entry</button>
         <button className={tab === "report" ? "tab on" : "tab"} onClick={() => setTab("report")}>Stock Report</button>
+        <button className={tab === "config" ? "tab on" : "tab"} onClick={() => setTab("config")}>Configuration</button>
         <div className="spacer" />
-        <div className="savebox">
-          {savedAt && <span className="saved">✓ saved {savedAt.toLocaleTimeString()}</span>}
-          {!savedAt && <span className="unsaved">unsaved changes</span>}
-          <button className="save" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save Day"}</button>
-        </div>
+        {tab !== "config" && (
+          <div className="savebox">
+            {savedAt && <span className="saved">✓ saved {savedAt.toLocaleTimeString()}</span>}
+            {!savedAt && <span className="unsaved">unsaved changes</span>}
+            <button className="save" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save Day"}</button>
+          </div>
+        )}
+        {tab === "config" && <span className="saved" style={{ padding: "8px 0" }}>changes save automatically</span>}
       </div>
 
       {/* ===== entry ===== */}
@@ -371,6 +423,76 @@ export default function App() {
               ))}
             </div>
             <div>Opening <b>{inr(totals.openVal)}</b> → Closing <b>{inr(totals.closeVal)}</b></div>
+          </div>
+        </>
+      )}
+
+      {/* ===== configuration ===== */}
+      {tab === "config" && (
+        <>
+          <div className="toolbar">
+            <input className="search" placeholder="Search product or code…" value={query} onChange={(e) => setQuery(e.target.value)} />
+            <label className="zt" title="Our fixed wholesaler margin, applied on the retail rate. RD = Retail ÷ (1 + this)">
+              Our margin&nbsp;
+              <DecCell value={config.ourMargin} suffix="%" onChange={(v) => saveConfig({ ...config, ourMargin: v })} />
+            </label>
+          </div>
+
+          <div className="hint">
+            Pack standards (read-only) drive Case·Box·Pcs → pieces. Editable: <b>Margin</b> (retailer, divisor on MRP),{" "}
+            <b>GST %</b> and <b>WS %</b> (flat % off MRP for wholesalers). Retails = MRP ÷ Margin · RD = Retails ÷ (1 + our %) · Cost = RD ÷ (1 + GST) — used for stock value.
+          </div>
+
+          <div className="gridwrap">
+            <table className="grid">
+              <thead>
+                <tr>
+                  <th className="stick code">Code</th>
+                  <th className="stick desc">Product</th>
+                  <th className="num">MRP</th>
+                  <th className="num">Pcs/Box</th>
+                  <th className="num">Pcs/Case</th>
+                  <th className="num">Box/Case</th>
+                  <th>Margin</th>
+                  <th>GST %</th>
+                  <th className="num">Retails</th>
+                  <th className="num">RD</th>
+                  <th className="num closing">Cost ex-GST</th>
+                  <th>WS %</th>
+                  <th className="num">WS Rate</th>
+                  <th className="num">Cost/Case</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((p) => {
+                  const cfg = config.perSku[p.code] || {};
+                  const pr = skuPricing(p.mrp, cfg, config.ourMargin);
+                  return (
+                    <tr key={p.code}>
+                      <td className="stick code mono">{p.code}</td>
+                      <td className="stick desc">{p.desc}</td>
+                      <td className="num dim">{p.mrp}</td>
+                      <td className="num">{p.pcsOuter || "–"}</td>
+                      <td className="num">{p.pcsCase || "–"}</td>
+                      <td className="num dim">{p.pcsOuter > 0 ? (p.pcsCase / p.pcsOuter).toFixed(1).replace(/\.0$/, "") : "–"}</td>
+                      <td className="inp"><DecCell value={cfg.margin ?? SKU_DEFAULTS.margin} onChange={(v) => setSkuCfg(p.code, "margin", v)} /></td>
+                      <td className="inp"><DecCell value={cfg.gst ?? SKU_DEFAULTS.gst} suffix="%" onChange={(v) => setSkuCfg(p.code, "gst", v)} /></td>
+                      <td className="num">{pr.retail.toFixed(2)}</td>
+                      <td className="num">{pr.rd.toFixed(2)}</td>
+                      <td className="num closing">{pr.cost.toFixed(2)}</td>
+                      <td className="inp"><DecCell value={cfg.ws ?? SKU_DEFAULTS.ws} suffix="%" onChange={(v) => setSkuCfg(p.code, "ws", v)} /></td>
+                      <td className="num">{pr.ws.toFixed(2)}</td>
+                      <td className="num dim">{(pr.cost * p.pcsCase).toFixed(2)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="footbar">
+            <div>Showing <b>{rows.length}</b> / {products.length} products</div>
+            <div className="ftot"><span>Retails = MRP ÷ Margin</span><span>RD = Retails ÷ (1 + {config.ourMargin}%)</span><span>Cost = RD ÷ (1 + GST)</span><span>WS Rate = MRP × (1 − WS%)</span></div>
           </div>
         </>
       )}
@@ -485,6 +607,9 @@ const CSS = `
 .inp { padding:1px 3px; }
 .ncell { width:48px; border:1px solid #e0d4bf; border-radius:4px; padding:3px 4px; text-align:center; font-size:12.5px; background:#fffdf8; font-variant-numeric:tabular-nums; }
 .ncell:focus { outline:none; border-color:#6b1f24; background:#fff; box-shadow:0 0 0 2px rgba(107,31,36,.12); }
+.dwrap { display:inline-flex; align-items:center; gap:2px; }
+.dcell { width:52px; }
+.dsuf { font-size:10px; color:#9a8a72; }
 .rneg td { background:#fdecec !important; }
 .negtxt { color:#b3261e !important; }
 
