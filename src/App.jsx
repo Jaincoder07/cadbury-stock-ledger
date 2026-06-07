@@ -502,10 +502,13 @@ export default function App() {
                   <th className="stick desc">Product</th>
                   <th className="num">MRP</th>
                   <th className="grp">Opening<br /><span>C · B · P</span></th>
+                  <th className="num">Open<br /><span>Pcs</span></th>
                   <th className="grp" style={{ color: activeMv.color }}>{activeMv.label}<br /><span>Case</span></th>
                   <th className="grp" style={{ color: activeMv.color }}><br /><span>Box</span></th>
                   <th className="grp" style={{ color: activeMv.color }}><br /><span>Pcs</span></th>
+                  <th className="num" style={{ color: activeMv.color }}>Total<br /><span>Pcs</span></th>
                   <th className="grp closing">Closing<br /><span>C · B · P</span></th>
+                  <th className="num closing">Close<br /><span>Pcs</span></th>
                   <th className="num">Value</th>
                 </tr>
               </thead>
@@ -523,10 +526,13 @@ export default function App() {
                       <td className="stick desc">{p.desc}</td>
                       <td className="num dim">{p.mrp}</td>
                       <td className="cbp">{od.c}·{od.b}·{od.p}</td>
+                      <td className="num dim">{o}</td>
                       <td className="inp"><NumCell value={cell.c} accent={activeMv.color} onChange={(v) => setCell(p.code, activeMove, "c", v)} /></td>
                       <td className="inp"><NumCell value={cell.b} accent={activeMv.color} onChange={(v) => setCell(p.code, activeMove, "b", v)} /></td>
                       <td className="inp"><NumCell value={cell.p} accent={activeMv.color} onChange={(v) => setCell(p.code, activeMove, "p", v)} /></td>
+                      <td className="num" style={{ color: activeMv.color, fontWeight: 600 }}>{toPcs(cell.c, cell.b, cell.p, p.pcsCase, p.pcsOuter) || ""}</td>
                       <td className={"cbp closing" + (neg ? " negtxt" : "")}>{cd.c}·{cd.b}·{cd.p}</td>
+                      <td className={"num closing" + (neg ? " negtxt" : "")}>{cl}</td>
                       <td className="num">{inr(cl * p.mrp)}</td>
                     </tr>
                   );
@@ -838,7 +844,7 @@ const CSS = `
 .cbp { text-align:center; font-family:'IBM Plex Mono',monospace; font-size:11.5px; color:#4a3a28; }
 .closing { background:#f3f7f3; font-weight:600; }
 .grid thead th.closing { background:#e3eee3; color:#1b6b40; }
-.inp { padding:1px 3px; }
+.inp { padding:1px 3px; text-align:center; }
 .ncell { width:48px; border:1px solid #e0d4bf; border-radius:4px; padding:3px 4px; text-align:center; font-size:12.5px; background:#fffdf8; font-variant-numeric:tabular-nums; }
 .ncell:focus { outline:none; border-color:#6b1f24; background:#fff; box-shadow:0 0 0 2px rgba(107,31,36,.12); }
 .addpanel { margin:0 18px 10px; padding:12px 14px; background:#fff; border:1.5px solid #6b1f24; border-radius:9px; }
