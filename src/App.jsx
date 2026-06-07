@@ -432,7 +432,7 @@ function FilterTh({ label, sub, col, values, selected, openCol, setOpenCol, onAp
           <input className="hfsearch" placeholder="Search…" value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
           <div className="hfactions">
             <button onClick={() => onApply(null)}>Select all</button>
-            <button onClick={() => onApply([])}>Clear</button>
+            <button onClick={() => onApply([])}>Unselect all</button>
           </div>
           <div className="hflist">
             {shown.map((v) => (
@@ -1651,7 +1651,7 @@ export default function App() {
                 selected={cfgSel[col] ?? null} openCol={cfgOpenF} setOpenCol={setCfgOpenF} onApply={setColFilter(col)} />
             );
             return (<>
-          <div className="gridwrap">
+          <div className="gridwrap" style={cfgOpenF ? { minHeight: 420 } : undefined}>
             {cfgOpenF && <div className="hfback" onClick={() => setCfgOpenF(null)} />}
             <table className="grid">
               <thead>
