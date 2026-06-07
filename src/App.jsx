@@ -1292,6 +1292,10 @@ export default function App() {
               <button className={plMode === "day" ? "mp on" : "mp"} style={plMode === "day" ? { background: "#6b1f24", borderColor: "#6b1f24" } : { color: "#6b1f24", borderColor: "#6b1f24" }} onClick={() => setPlMode("day")}>Day</button>
               <button className={plMode === "month" ? "mp on" : "mp"} style={plMode === "month" ? { background: "#6b1f24", borderColor: "#6b1f24" } : { color: "#6b1f24", borderColor: "#6b1f24" }} onClick={() => setPlMode("month")}>Month</button>
             </div>
+            {plMode === "day" && (
+              <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
+                style={{ padding: "7px 10px", borderRadius: 7, border: "1px solid #d2c2a8", background: "#fff", fontSize: 13 }} />
+            )}
             {plMode === "month" && (
               <input type="month" value={plMonth} onChange={(e) => setPlMonth(e.target.value)}
                 style={{ padding: "7px 10px", borderRadius: 7, border: "1px solid #d2c2a8", background: "#fff", fontSize: 13 }} />
