@@ -1100,6 +1100,7 @@ export default function App() {
           <button className="ghost" onClick={() => setDate(addDays(date, -1))}>‹ Prev</button>
           <button className="ghost" onClick={() => setDate(addDays(date, +1))}>Next ›</button>
           <button className="ghost" onClick={() => setDate(todayStr())}>Today</button>
+          <span className="datechip">{["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][new Date(date + "T00:00:00").getDay()]}, {fmtDate(date)}</span>
           <label className="ctl" title={myEmail}>
             <span>{isAdmin ? "Admin" : "User"}</span>
             <button className="ghost" onClick={signOut}>{myEmail.split("@")[0]} · Sign Out</button>
@@ -1867,6 +1868,7 @@ const CSS = `
 .ctl { display:flex; flex-direction:column; gap:3px; font-size:10px; text-transform:uppercase; letter-spacing:1px; opacity:.85; }
 .ctl select, .ctl input { background:#3a2e22; border:1px solid #54442f; color:#f4efe6; border-radius:6px; padding:6px 8px; font-size:13px; }
 .ghost { background:transparent; border:1px solid #54442f; color:#f4efe6; border-radius:6px; padding:7px 10px; cursor:pointer; font-size:12px; }
+.datechip { background:#54442f; color:#f4efe6; border-radius:6px; padding:8px 12px; font-size:12px; font-weight:700; letter-spacing:.5px; }
 .ghost:hover { background:#3a2e22; }
 
 .tabs { display:flex; align-items:center; gap:4px; padding:0 18px; background:#e7dccb; border-bottom:2px solid #d2c2a8; }
