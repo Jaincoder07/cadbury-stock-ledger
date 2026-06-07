@@ -2,9 +2,6 @@ import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { supabase, kvGetMany, kvSet, kvSetBg, kvGetLike, kvUpsertMany, kvDeleteMany, onStorageError } from "./storage";
 import * as XLSX from "xlsx";
 
-// Seed products from client's actual Cadbury stock sheet:
-// [code, desc, mrp, pcsOuter (Box=outer), pcsCase, openCase, openBox, openPcs]
-const SEED = [["FUSE20","CADBURY FUSE 27.5G",20.0,24,384,23,7,22],["FUSE40","CAD FUSE 50G RS-40",40.0,24,216,2,4,12],["FUSE45","CAD FUSE 43G",45.0,24,216,0,0,0],["FUSE50","CAD FUSE 43G",50.0,24,216,0,0,0],["SBB195","CDM SILK BUBBLY 195",195.0,10,60,2,1,8],["SBBN195","CDM SILK BUBBLY 195 8 OTR",195.0,10,80,0,0,0],["SBBN195-2","CDM SILK BUBBLY 112g VLNTN 8 OTR",195.0,10,80,0,0,0],["SBS90","CDM SILK BUBBLY RS-90 8 OTR",90.0,20,160,0,0,1],["SBSN90","CDM SILK BUBBLY RS-90 6 OTR",90.0,20,120,0,0,0],["SBSN90-2","CDM SILK BUBBLY RS 95 /- 8 OTR",95.0,20,160,0,0,0],["SBS100","CDM SILK BUBBLY RS 100/- 8 OTR",100.0,20,160,0,0,0],["SBS98","CDM SILK BUBBLY 46G RS. 98 PRICING",98.0,20,160,0,0,0],["SBSN100","CDM SILK BUBBLY RS 100/- 6 OTR",100.0,20,120,0,0,0],["SBSB220","CDM SILK BUBBLY 220/-  8 OTR",220.0,10,80,0,0,0],["SBSB240","CDM SILK BUBBLY 240/-  8 OTR",240.0,10,80,0,0,0],["SBSB214","CDM SILK BUBBLY 112G RS. 214 PRC",214.0,10,80,0,0,0],["SBS110","CDM SILK BUBBLY RS 110/- 8 OTR",110.0,20,160,0,0,0],["Silk140","Silk Plum 140/-",140.0,24,144,0,2,1],["Silk140-2","Silk Walnut 140/-",140.0,24,144,1,0,7],["CDMS120","CDM SILK UI WALNUT BROWNIE 70G  RS. 120",120.0,24,144,0,0,0],["CDMS107","CDM SILK UI WALNUT BROWNIE 70G  RS.107 PRC",107.0,24,144,0,0,0],["CDMS107-2","CDM SILK UI PLUM CAKE 70G  RS. 107",107.0,24,144,0,0,0],["CDMS120-2","CDM SILK UI PLUM CAKE 70G  RS. 120",120.0,24,144,0,0,0],["SOB195","CDM SILK OREO 195",195.0,12,72,17,5,9],["SOS","CDM SILK OREO 60G RS-90--",90.0,32,192,8,4,21],["SOS95","CDM SILK OREO 60G RS-95/-",95.0,32,192,0,0,0],["SOB","CDM SILK OREO 130g crtn vltn",195.0,12,72,0,0,0],["SOB100","CDM SILK OREO 60G RS-100/-",100.0,32,192,0,0,0],["SOS110","CDM SILK OREO 58.5G RS-110/-",110.0,32,192,0,0,0],["SOS98","CDM SILK OREO 58.5G RS-98/-",98.0,32,192,0,0,0],["SOB220","CDM SILK OREO 220",220.0,12,72,0,0,0],["SOS65","CDM SILK OREO XS 40G",65.0,32,192,0,0,0],["SOS58","CDM SILK OREO XS 40G",58.0,32,192,0,0,0],["SOB240","CDM SILK OREO 240",240.0,12,72,0,0,0],["SOB214","CDM SILK OREO 124G RS. 214 PRC",214.0,12,72,0,0,0],["Silk280","Silk Plum 280/-",280.0,10,60,0,4,4],["Silk280-2","Silk Walnut 280/-",280.0,10,60,2,1,1],["CDMS300","CDM SILK UI WALNUT BROWNIE 140G",300.0,10,60,0,0,0],["CDMS267","CDM SILK  WALNUT BROWNIE 140G RS.267 PRC",267.0,10,60,0,0,0],["SGB195","Silk Ganache 195",195.0,10,60,5,2,7],["SGS90","Silk Ganache 90",90.0,32,192,6,4,21],["SGS95","Silk Ganache 95/-",95.0,32,192,0,0,0],["SGB146","Silk Ganache 146g valntn",195.0,10,60,0,0,0],["SGB220","Silk Ganache LARGE 146G 220/-",220.0,10,60,0,0,0],["SGB214","Silk Ganache LARGE 137G 214/-",214.0,10,60,0,0,0],["SGB240","Silk Ganache LARGE 137G 240/-",240.0,10,60,0,0,0],["SGS98","Silk Ganache 54G 98/-",98.0,32,192,0,0,0],["SGS100","Silk Ganache 100/-",100.0,32,192,0,0,0],["SGS110","Silk Ganache 54G 110/-",110.0,32,192,0,0,0],["SmoS90","SILK Mousse",90.0,24,144,0,1,12],["SmoB195","SILK Mousse",195.0,12,72,0,0,1],["SmoB220","SILK Mousse",220.0,12,72,0,0,0],["SmoB240","SILK Mousse",240.0,12,72,0,0,0],["SmoB214","CDM SILK MOUSSE 110G RS. 214 PRC",214.0,12,72,0,0,0],["SmoS95","SILK Mousse MRP 95 /-",95.0,24,144,0,0,0],["SmoS100","SILK Mousse 50G MRP 100 /-",100.0,24,144,0,0,0],["SmoS98","SILK Mousse 48.5G MRP 98 /-",98.0,24,144,0,0,0],["SmoS110","SILK Mousse 50G MRP 110 /-",110.0,24,144,0,0,0],["RA90","SILK Roast Almond",90.0,30,180,0,0,0],["RA95","SILK Roast Almond 95/-",95.0,30,180,0,0,0],["RA100","SILK Roast Almond 58G 100/-",100.0,30,180,0,0,0],["RA110","SILK Roast Almond 52G 110/-",110.0,30,180,0,0,0],["RA98","CDM SILK RA 52G RS. 98 PRC",98.0,30,180,0,0,0],["RA195","SILK Roast Almond",195.0,10,60,0,0,1],["RAN195","SILK Roast Almond 143G VLTN",195.0,10,60,0,0,0],["RA220","SILK Roast Almond 143G VLTN",220.0,10,60,0,0,0],["RA240","SILK Roast Almond 143G VLTN 240/-",240.0,10,60,0,0,0],["CDMS214","CDM SILK TRA 134G RS. 214 PRC",214.0,10,60,0,0,0],["CRISP35","Crispello",35.0,28,224,6,5,18],["CRISP10","Crispello",10.0,40,480,5,8,47],["CRISPN10","CDM Crispello 12.5G RS. 10/-",10.0,44,528,0,0,0],["CRISP20","CDM CRISPELLO 19.5G RS.20",20.0,30,300,0,0,0],["CRISP40","Crispello",40.0,28,224,0,0,0],["CRISP45","Crispello",45.0,28,224,0,0,0],["TAL110","Tempt Almond",110.0,10,60,0,0,6],["TRR120","Tempt Rum Raisin",120.0,10,60,1,1,1],["Bvillel50","Bville 50%",50.0,40,400,0,0,4],["Bvillel55","Bville 50% 55/-",55.0,40,400,0,0,0],["Bvillel60","Bville 50% 60/-",60.0,40,400,0,0,0],["BOURNVILLEN53","BOURNVILLE RICH COCOA 30G 40U PRC",53.0,40,400,0,0,0],["Bvillal110","Bvilla50%",110.0,10,60,0,0,0],["BVillel110","BVille70%",110.0,10,60,0,1,5],["BVilleFNl55","BVilleFN",55.0,40,400,8,2,16],["BVilleFNl53","BVilleFN 30G PRC",53.0,40,400,0,0,0],["BVilleFNl60","BVilleFN",60.0,40,400,0,0,0],["CR60","BVILLE CRANBERRY 30G",60.0,44,440,0,0,0],["CR60-2","BVILLE CRANBERRY 30G",53.0,44,176,0,0,0],["BRR110","Bville Rum Raisin",110.0,10,60,0,0,0],["BFN110","Bville F&N",110.0,10,60,0,0,0],["TAL120","Tempt Almond",120.0,10,60,0,0,0],["CR110","Bville CRANBERRY",110.0,10,60,0,0,0],["CR120","Bville CRANBERRY",120.0,10,60,0,0,0],["RC120","Bville RC 80G CRTN PK",120.0,10,60,0,0,0],["RC12070","Bville 70 % RICH COCOA",120.0,10,60,0,0,0],["RCF120","Bville F&N 120/- 80G",120.0,10,60,0,0,0],["BVIL120","Bville RUM & RAISIN  120/- 80G",120.0,10,60,0,0,0],["RC13070","Bville 70 % RICH COCOA 130 /-",130.0,10,60,0,0,0],["RCF130","Bville F&N 130/- 80G",130.0,10,60,0,0,0],["RCF140","Bville F&N 140/- 75G",140.0,10,60,0,0,0],["RCF134","BOURNVILLE FRUIT & NUT 75G RS. 134 PRC",134.0,10,60,0,0,0],["BVIL130","Bville RUM & RAISIN  130/- 80G",130.0,10,60,0,0,0],["BVIL134","Bville RUM & RAISIN  134/- 78g",134.0,10,60,0,0,0],["BVIL140","Bville RUM & RAISIN  140/- 78g",140.0,10,60,0,0,0],["CR130","Bville CRANBERRY 130 /-",130.0,10,60,0,0,0],["CR140","Bville CRANBERRY 140 /-",140.0,10,60,0,0,0],["CR135","Bville CRANBERRY 140 /-",140.0,10,60,0,0,0],["CR134","Bville CRANBERRY 78G RS. 134 /- PRC",134.0,10,60,0,0,0],["RC130","Bville RC 80G CRTN PK",130.0,10,60,0,0,0],["BVILN134","BOURNVILLE RC 75G CARTON PK RS. 134 PRC",134.0,10,60,0,0,0],["BVILO134","BOURNVILLE 50% ORANGE 75G",134.0,10,60,0,0,0],["BVILO150","BOURNVILLE 70% ORANGE 75G",150.0,10,60,0,0,0],["TRR130","Tempt Rum Raisin",130.0,10,60,0,0,0],["TAL130","Tempt ALMOND TREAT 70G",130.0,10,60,0,0,0],["TAL125","Tempt ALMOND TREAT 70G 125/-",125.0,10,60,0,0,0],["TAL140","Tempt ALMOND TREAT 70G 140/-",140.0,10,60,0,0,0],["TRR140","TEMPTATION R&R 70G CRTN PK RS. 140",140.0,10,60,0,0,0],["TRR125","TEMPTATION R&R 70G CRTN PK RS.125 PRC",125.0,10,60,0,0,0],["RC150","Bville 70 % RICH COCOA 130 /-",150.0,10,60,0,0,0],["RC140","Bville RC 75G CARTON PK RS. 140 /-",140.0,10,60,0,0,0],["BV5","Bourn Vita Shakti 14.4G",5.0,14,1008,8,0,420],["BV26","Bourn Vita 70g 26 MRP",26.0,12,192,22,0,216],["BV30","Bourn Vita 70g 30 MRP",30.0,12,192,22,0,216],["BV30-2","Bourn Vita 81g 30 MRP",30.0,12,192,0,0,0],["BV345","Bourn Vita RS 45/-",45.0,6,96,0,0,32],["BV138","Bourn Vita 200G JAR 138mrp",138.0,1,30,6,0,17],["BV110","Bourn Vita 200G JAR AW CHG 110/-",110.0,1,30,0,0,0],["BV249","Bourn Vita Pouch 500gm 249 MRP",249.0,1,32,0,0,0],["BV270","Bourn Vita Pouch 500gm 270 MRP",270.0,1,32,0,0,0],["BV280","Bourn Vita Pouch 500gm 280 MRP",280.0,1,32,0,0,0],["BV150","Bourn Vita 200G JAR 150mrp",150.0,1,30,0,0,0],["BV255","Bourn Vita Pouch 500gm Promo 255 MRP",255.0,1,32,4,0,19],["BV150-2","BOURNVITA 200G POUCH",99.0,1,40,0,0,0],["BV270-2","Bourn Vita 500 Gm JAR 270/- MRP",270.0,0,15,9,0,4],["BV285","Bourn Vita 500 Gm JAR 285/- MRP",285.0,0,15,0,0,0],["BV295","BOURNVITA 500G JAR OMNI Q'3",295.0,0,15,0,0,0],["BV263","Bourn Vita 500 Gm JAR 263/- MRP",263.0,0,15,0,0,0],["BV470","Bourn Vita Refill 1 kg  470/- MRP",470.0,0,12,5,0,7],["BV458","Bourn Vita Refill 1 kg GP Q,3 PRC  458/- MRP",458.0,0,12,0,0,0],["BV500","Bourn Vita Refill 1 kg  500/- MRP",500.0,0,12,0,0,0],["BV506","Bourn Vita JAR 1 KG RS 506 /-",506.0,1,12,4,0,0],["BV530","Bourn Vita JAR 1 KG RS 530 /-",530.0,1,12,0,0,0],["BV485","Bourn Vita JAR 1 KG Q3 PRC 485/-",485.0,1,12,0,0,0],["BV545","Bourn Vita JAR 1 KG Q3",545.0,1,12,0,0,0],["BV461","Bourn Vita JAR 1 KG promo 461 /-",461.0,1,12,0,0,0],["BV310","Bourn Vita FSM Jar 310 MRP",310.0,1,15,1,0,0],["BV330","Bourn Vita FSM  JAR 500GM",330.0,1,15,0,0,0],["BV294","BOURNVITA FSM JAR 500G Q'3 PRC",294.0,1,15,0,0,0],["BV128","Bourn Vita 200G JAR 128",128.0,1,30,0,0,1],["BV155","Bourn Vita 200G JAR Q'3",155.0,1,30,0,0,0],["BV479","Bourn Vita 1 kg JAR MRP 479",479.0,1,12,2,0,9],["BV255-2","Bourn Vita 500 Gm Jar255 MRP",255.0,1,15,0,0,0],["BV239","Bourn Vita Pouch 500gm Promo 239 MRP",239.0,1,32,0,0,12],["BV230","Bourn Vita 230 MRP",230.0,1,32,0,0,33],["BV404","Bourn Vita 404 MRP Fsm",404.0,1,16,0,0,0],["BV458-2","Bourn Vita 458 MRP 1kG",458.0,1,8,0,0,0],["BV261","Bourn Vita FSN Refill 261 MRP",261.0,1,32,0,0,23],["BV305","BOURNVITA FSM POUCH 500G",305.0,1,32,0,0,0],["BV379","Bourn Vita 750 G Refill MRP 379",379.0,1,16,0,0,0],["TAL165","Tang 500 Gm Lemon",165.0,1,24,0,0,15],["TAO30","Tang Orange 30mrp",30.0,12,96,0,0,6],["TAO170","Tang 500 Gm ORANGE",170.0,1,24,0,0,0],["TAM170","Tang 500 Gm MANGO",170.0,1,24,0,0,0],["TAL170","Tang 500 Gm LEMON",170.0,1,24,0,0,0],["TAO5","Tang 15.3G ORANGE",5.0,12,360,0,0,0],["TAL5","Tang 15.3G LEMON",5.0,12,360,0,0,0],["TAM5","Tang 15.3G MANGO",5.0,12,360,0,0,0],["TAO280","Tang 750G ORANGE",280.0,1,12,0,0,0],["TAL280","Tang 750G LEMON",280.0,1,12,0,0,0],["TAM280","Tang 750G MANGO",280.0,1,12,0,0,0],["TAO30-2","Tang 75G ORANGE",30.0,12,96,0,0,0],["TAL30","Tang 75G LEMON",30.0,12,96,0,0,0],["TAM30","Tang 75G MANGO",30.0,12,96,0,0,0],["TAO5-2","Tang 17.2G ORANGE",5.0,12,360,0,0,0],["TAO30-3","Tang 75G ORANGE",26.0,12,96,0,0,0],["TAL30-2","Tang 75G LEMON",26.0,12,96,0,0,0],["TAM30-2","Tang 75G MANGO",26.0,12,96,0,0,0],["TAO170-2","Tang 500 Gm ORANGE",150.0,1,24,0,0,0],["TAM170-2","Tang 500 Gm MANGO",150.0,1,24,0,0,0],["TAL170-2","Tang 500 Gm LEMON",150.0,1,24,0,0,0],["RA49","CDM ROAST ALMOND 36G  49 /-",49.0,40,360,1,0,13],["RA55","CDM ROAST ALMOND",55.0,40,360,1,0,13],["FN55","CDM FRUIT&NUT",55.0,40,360,2,4,11],["FN49","CDM FRUIT&NUT 36G 49/-",49.0,40,360,0,0,0],["CRAK10","CDM CRACKLE PRC",10.0,52,624,0,0,0],["CRAK55","CDM CRACKLE",55.0,40,360,2,6,7],["CRAK49","CDM CRACKLE PRC",49.0,40,360,0,0,0],["CDMM50","CDM MOCHA ALMOND",50.0,40,360,2,2,5],["FN110","CDM F&N 75G 110/-",110.0,15,150,1,2,6],["FN120","CDM F&N 75G 120/-",120.0,15,150,1,0,0],["FN107","CDM F&N 75G 107/-",107.0,15,150,1,0,0],["RA45","ROAST ALMOND",45.0,40,360,0,0,0],["RA100-2","ROAST ALMOND",100.0,15,150,0,0,0],["RA50","ROAST ALMOND",50.0,40,360,0,0,2],["RA110-2","CDM ROAST ALMOND 75G 110/-",110.0,15,150,1,1,4],["RA107","CDM ROAST ALMOND 75G 107/-",107.0,15,150,0,0,0],["RA120","CDM ROAST ALMOND 75G 120/-",120.0,15,150,0,0,0],["FN50","CDM FRUIT&NUT 50/-",50.0,40,360,0,0,0],["FN90","CDM FRUIT&NUT90",90.0,15,150,0,0,1],["FN100","CDM FRUIT&NUT 100/-",100.0,15,150,0,0,6],["CRAK45","CDM CRACKLE45",45.0,40,360,0,0,0],["CRAK90","CDM CRACKLE90",90.0,15,150,0,1,5],["CRAK107","CDM CRACKLE 75G 107/-",107.0,15,150,0,0,0],["CRAK110","CDM CRACKLE 75G 110/-",110.0,15,150,1,4,10],["CRAK120","CDM CRACKLE 75G 120/-",120.0,15,150,0,0,0],["CRAK50","CDM CRACKLE 50",50.0,40,360,0,0,0],["CDMK45","CDM KESARNUT45",45.0,40,360,0,0,0],["CDMC45","CDM CRUMBLE45",45.0,40,360,0,0,2],["BVB10","BOURNVITA BISCUITS",10.0,12,120,4,6,3],["BVB35","BOURNVITA BISCUITS",35.0,0,50,1,0,36],["BVB30","BOURNVITA BISCUITS",30.0,0,50,0,0,0],["SHORT5","SHORT 5",5.0,64,1152,2,3,28],["SHORT10","SHORT10",10.0,48,576,6,11,0],["GEMS45","GEMS SURPRISE 14.69G*12OT R45/-",45.0,12,144,0,0,0],["GEMS50","GEMS SURPRISE50",50.0,12,144,0,0,1],["NUTTY50","NUTTIES 50/-",50.0,24,192,1,7,22],["NUTTY45","NUTTIES 45/-",45.0,24,192,0,0,0],["LO5","LOLLY",5.0,48,1152,6,15,0],["LICK45","LICKABLES 45",45.0,12,108,0,0,0],["LICK50","LICKABLES 50",50.0,12,108,1,4,11],["GOLD10","CHOCLAIRS GOLD  10 /-",10.0,24,432,14,14,0],["SHORT116","SHORT116",116.0,58,50,0,0,47],["GOLD50","CHOCLAIRS GOLD50",50.0,10,80,2,1,12],["GOLD120","CHOCLAIRS GOLD120 60+2U",120.0,0,36,3,0,3],["GOLD200","CHOCLAIRS GOLD  200",200.0,105,18,2,0,16],["GOLDCO","CHOCLAIRS GOLD COFFEE 200",200.0,105,18,0,0,5],["GOLDCO120","CHOCLAIRS COFFE 120 60 UNIT",120.0,0,36,1,0,20],["GOLD60","CHOCLAIRS GOLD 60U 60",60.0,1,54,0,0,0],["HOT230","HOT CHOCOLATE 230",230.0,0,60,0,0,0],["COCO275","COCOA  POWDER 275",275.0,0,60,0,0,1],["COCO370","COCOA  POWDER  370",370.0,0,60,0,0,0],["COCO325","COCOA  POWDER 150G 325/-",325.0,0,60,4,0,34],["COCO329","COCOA  POWDER 150G Q'3 PRC 329/-",329.0,0,60,0,0,0],["HOT325","HOT CHOCOLATE 200G 325/-",325.0,0,60,0,0,41],["HOT275","HOT CHOCOLATE 200G 275/-",275.0,0,60,0,0,41],["HOT289","HOT CHOCOLATE 200G Q'3 PRC",289.0,0,60,0,0,0],["CADBURYU30","CADBURY INSTANT HOT CHOC 30G",30.0,10,240,1,19,6],["GOLD180","CHOCLAIRS GOLD  2.8G*180U 5 STAR JAR",180.0,1,16,0,0,0],["GOLD240","CHOCLAIRS GOLD  240 /-",240.0,120,16,1,0,8],["GOLD1000","CHOCLAIRS GOLD  1000 /-",1000.0,0,2,19,0,1],["GOLD230","CHOCLAIRS GOLD  230 /-",230.0,120,16,0,0,0],["P244","CADBURY MINI TREAT 149/-",149.0,0,48,0,0,4],["CADBURYU220","CADBURY SILK MINI TREAT 220/-",220.0,0,48,0,0,0],["P246","GEMS MINI TREAT 100/-",100.0,0,48,1,0,0],["FIVE120","FIVE STAR MININ TREAT 120/-",120.0,0,64,2,0,8],["5STARHTS2496G","5STAR HTS 249.6G 200/-",200.0,0,48,0,0,0],["CDMH200","CDM HOME TREAT 140G RS. 200/-",200.0,0,48,0,0,0],["CHOCLAIRSGOLD120U","CHOCLAIRS GOLD 120U Rs.120",120.0,120,32,3,0,3],["P251","CADBURY FUSE MINI TREAT",120.0,0,60,0,0,79],["P252","CADBURY PERK MINI TREAT",100.0,0,32,0,0,30],["CDM120","CDM  MINI TREAT",120.0,0,60,0,0,54],["CDMW50","CDM WHOLE ALMOND BITES 30GM",50.0,14,168,0,10,11],["5 STARSTA60","5 STAR KITTED PACK 108G (18G*6U) RC",60.0,1,96,0,0,98],["CDMW100","CDM WHOLE ALMOND BITES 30GM",50.0,1,20,0,0,0],["HOT325-2","HOT CHOCOLATE 200G 325/-",325.0,0,60,0,0,0],["CADBURYU240","CADBURY SILK MINI TREAT 240/-",240.0,0,48,0,0,0],["SHT214","CADBURY SILK HOME TREATS 135G 214/-",214.0,0,48,0,0,0],["CADBURYU133","5STAR HT 166.6G(17UX9.8G)  133/-",133.0,1,48,0,0,0],["SHT133","CADBURY HOME TREATS 98G  133/-",133.0,1,60,0,0,0],["CADBURYU133-2","CADBURY ASSORTED TREATS 125.1G  133/-",133.0,1,48,0,0,0]];
 
 const WAREHOUSES_DEFAULT = ["Main Warehouse"];
 
@@ -51,7 +48,7 @@ const fromPcs = (total, pcsCase, pcsOuter) => {
 };
 
 // storage keys
-const K_PRODUCTS = "cad:products";
+const prodKey = (wh) => `cad:products:${wh}`;             // product master — separate per warehouse
 const K_WAREHOUSES = "cad:warehouses";
 const K_CONFIG = "cad:config";
 const K_USERS = "cad:users";   // email -> { role: "admin"|"user", warehouses: [names] }
@@ -148,8 +145,10 @@ function TextCell({ value, onCommit, width }) {
   );
 }
 
-// ---------- opening stock upload (admin) ----------
-// Sheet format: a header row containing CODE plus CASE / BOX / PCS columns (any of the three).
+// ---------- stock sheet upload (admin) ----------
+// Builds this warehouse's product master AND opening stock from one sheet.
+// Header row must contain: CODE, PRODUCT/DESCRIPTION, MRP, BOX/CASE, PCS/BOX,
+// and opening quantity columns CASE, BOX, PCS (plain names, no "/").
 function UploadOpeningPanel({ products, wh, onApply, onClose }) {
   const [asOn, setAsOn] = useState("2026-06-01");
   const [preview, setPreview] = useState(null);
@@ -161,29 +160,56 @@ function UploadOpeningPanel({ products, wh, onApply, onClose }) {
     try {
       const wb = XLSX.read(await file.arrayBuffer());
       const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: "" });
-      // find header row: first row with a cell matching "code"
       const hi = rows.findIndex((r) => r.some((c) => /code/i.test(String(c))));
       if (hi < 0) throw new Error("No header row with a CODE column found.");
-      const hdr = rows[hi].map((c) => String(c).toLowerCase().trim());
-      const ci = hdr.findIndex((h) => /code/.test(h));
-      const caseI = hdr.findIndex((h) => /^case|cases/.test(h));
-      const boxI = hdr.findIndex((h) => /^box/.test(h));
-      const pcsI = hdr.findIndex((h) => /^(pcs|pieces|piece)/.test(h));
-      if (caseI < 0 && boxI < 0 && pcsI < 0) throw new Error("No CASE / BOX / PCS quantity columns found.");
+      const hdr = rows[hi].map((c) => String(c).toLowerCase().replace(/\s+/g, " ").trim());
+      const find = (re) => hdr.findIndex((h) => re.test(h));
+      const ci = find(/code/);
+      const di = find(/desc|product|name|item/);
+      const mi = find(/mrp|price/);
+      const bpcI = find(/box(es)? ?\/ ?case|box(es)? per case/);      // ratio: boxes per case
+      const ppbI = find(/pcs ?\/ ?box|pcs per box|pieces ?\/ ?box/);  // ratio: pcs per box
+      // opening quantities: plain CASE / BOX / PCS columns (must not contain "/")
+      const plain = (re) => hdr.findIndex((h) => re.test(h) && !h.includes("/"));
+      const caseI = plain(/^(opening )?cases?$/);
+      const boxI = plain(/^(opening )?box(es)?$/);
+      const pcsI = plain(/^(opening )?(pcs|pieces)$/);
+      if (caseI < 0 && boxI < 0 && pcsI < 0) throw new Error("No opening CASE / BOX / PCS columns found.");
+
       const byCode = {};
       products.forEach((p) => (byCode[p.code.toLowerCase()] = p));
-      const open = {}; const unmatched = []; let matched = 0;
+      const open = {}, newProducts = [], updates = {}, skipped = [];
+      const seen = new Set();
       for (let i = hi + 1; i < rows.length; i++) {
-        const code = String(rows[i][ci] ?? "").trim();
-        if (!code) continue;
-        const p = byCode[code.toLowerCase()];
-        const num = (idx) => (idx >= 0 ? parseInt(rows[i][idx], 10) || 0 : 0);
-        if (!p) { unmatched.push(code); continue; }
-        open[p.code] = toPcs(num(caseI), num(boxI), num(pcsI), p.pcsCase, p.pcsOuter);
-        matched++;
+        const r = rows[i];
+        const code = String(r[ci] ?? "").trim();
+        if (!code || seen.has(code.toLowerCase())) continue;
+        seen.add(code.toLowerCase());
+        const num = (idx) => (idx >= 0 ? parseFloat(r[idx]) || 0 : 0);
+        const int = (idx) => (idx >= 0 ? parseInt(r[idx], 10) || 0 : 0);
+        let p = byCode[code.toLowerCase()];
+        if (!p) {
+          // create from sheet — needs desc, mrp and pack ratios
+          const desc = di >= 0 ? String(r[di]).trim() : "";
+          const mrp = num(mi);
+          const boxes = int(bpcI), pcsOuter = int(ppbI);
+          if (!desc || mrp <= 0 || boxes <= 0 || pcsOuter <= 0) { skipped.push(code); continue; }
+          p = { code, desc, mrp, pcsOuter, pcsCase: boxes * pcsOuter, openCase: 0, openBox: 0, openPcs: 0 };
+          newProducts.push(p);
+        } else {
+          // existing product: refresh master fields the sheet provides
+          const f = {};
+          if (di >= 0 && String(r[di]).trim()) f.desc = String(r[di]).trim();
+          if (mi >= 0 && num(mi) > 0) f.mrp = num(mi);
+          const boxes = int(bpcI), pcsOuter = int(ppbI);
+          if (boxes > 0 && pcsOuter > 0) { f.pcsOuter = pcsOuter; f.pcsCase = boxes * pcsOuter; }
+          if (Object.keys(f).length) updates[p.code] = f;
+          p = { ...p, ...f };
+        }
+        open[p.code] = toPcs(int(caseI), int(boxI), int(pcsI), p.pcsCase, p.pcsOuter);
       }
-      if (!matched) throw new Error("No rows matched any product code.");
-      setPreview({ open, matched, unmatched });
+      if (!Object.keys(open).length) throw new Error("No usable rows found.");
+      setPreview({ open, newProducts, updates, skipped });
     } catch (e) {
       setErr(e.message || String(e));
     }
@@ -192,7 +218,7 @@ function UploadOpeningPanel({ products, wh, onApply, onClose }) {
   const apply = async () => {
     setBusy(true);
     try {
-      await onApply(asOn, preview.open);
+      await onApply(asOn, preview.open, preview.newProducts, preview.updates);
       onClose();
     } catch (e) { setErr(e.message || String(e)); }
     setBusy(false);
@@ -202,18 +228,18 @@ function UploadOpeningPanel({ products, wh, onApply, onClose }) {
     <div className="addpanel">
       <div className="aprow">
         <label>Opening as on<input type="date" value={asOn} onChange={(e) => setAsOn(e.target.value)} style={{ width: 140 }} /></label>
-        <label className="wide">Stock sheet (.xlsx / .csv) — columns: CODE, CASE, BOX, PCS
+        <label className="wide">Stock sheet (.xlsx / .csv) — CODE, PRODUCT, MRP, BOX/CASE, PCS/BOX, CASE, BOX, PCS
           <input type="file" accept=".xlsx,.xls,.csv" onChange={(e) => e.target.files[0] && parseFile(e.target.files[0])} />
         </label>
-        {preview && <button className="save" onClick={apply} disabled={busy}>{busy ? "Applying…" : `Set opening for ${wh}`}</button>}
+        {preview && <button className="save" onClick={apply} disabled={busy}>{busy ? "Applying…" : `Apply to ${wh}`}</button>}
         <button className="ghost2" onClick={onClose}>Cancel</button>
       </div>
       {preview && (
         <div className="apwarn" style={{ color: "#1b7f4d" }}>
-          ✓ {preview.matched} products matched — applying will set their opening stock for <b>{wh}</b> as on {asOn}.
-          Products not in the sheet keep opening 0.
-          {preview.unmatched.length > 0 && (
-            <div className="aperr">⚠ {preview.unmatched.length} codes not found (skipped): {preview.unmatched.slice(0, 12).join(", ")}{preview.unmatched.length > 12 ? "…" : ""}</div>
+          ✓ {preview.newProducts.length} new products will be created, {Object.keys(preview.updates).length} existing updated,
+          opening stock set for {Object.keys(preview.open).length} products in <b>{wh}</b> as on {asOn}.
+          {preview.skipped.length > 0 && (
+            <div className="aperr">⚠ {preview.skipped.length} rows skipped (missing product/MRP/Box-Case/Pcs-Box): {preview.skipped.slice(0, 12).join(", ")}{preview.skipped.length > 12 ? "…" : ""}</div>
           )}
         </div>
       )}
@@ -420,7 +446,7 @@ export default function App() {
   const updateProduct = (code, fields) => {
     setProducts((prev) => {
       const next = prev.map((p) => (p.code === code ? { ...p, ...fields } : p));
-      kvSetBg(K_PRODUCTS, next);
+      kvSetBg(prodKey(wh), next);
       return next;
     });
   };
@@ -435,7 +461,7 @@ export default function App() {
     }
     setProducts((prev) => {
       const next = prev.map((p) => (p.code === oldCode ? { ...p, code: newCode } : p));
-      kvSetBg(K_PRODUCTS, next);
+      kvSetBg(prodKey(wh), next);
       return next;
     });
     if (config.perSku[oldCode]) {
@@ -472,7 +498,7 @@ export default function App() {
   const addProduct = (np) => {
     setProducts((prev) => {
       const next = [...prev, np];
-      kvSetBg(K_PRODUCTS, next);
+      kvSetBg(prodKey(wh), next);
       return next;
     });
     // make its opening stock visible on the currently loaded day
@@ -502,17 +528,7 @@ export default function App() {
     (async () => {
       setLoading(true);
       try {
-        const m = await kvGetMany([K_PRODUCTS, K_WAREHOUSES, K_CONFIG, K_USERS]);
-        let p = m[K_PRODUCTS];
-        if (!p) {
-          p = SEED.map((r) => ({
-            code: r[0], desc: r[1], mrp: r[2],
-            pcsOuter: r[3], pcsCase: r[4],
-            openCase: r[5], openBox: r[6], openPcs: r[7],
-          }));
-          await kvSet(K_PRODUCTS, p);
-        }
-        setProducts(p);
+        const m = await kvGetMany([K_WAREHOUSES, K_CONFIG, K_USERS]);
         let w = m[K_WAREHOUSES];
         if (!w) { w = WAREHOUSES_DEFAULT; kvSetBg(K_WAREHOUSES, w); }
         setWarehouses(w);
@@ -543,6 +559,23 @@ export default function App() {
   }, [profile, isAdmin, warehouses]);
 
   const saveUsers = (next) => { setUsersMap(next); kvSetBg(K_USERS, next); };
+
+  // ---- load this warehouse's product master (each warehouse has its own, from its sheet) ----
+  useEffect(() => {
+    if (!session || !profile || !wh) return;
+    let alive = true;
+    (async () => {
+      setProducts(null); // pauses day-loading until master arrives
+      try {
+        const m = await kvGetMany([prodKey(wh)]);
+        if (alive) setProducts(m[prodKey(wh)] || []);
+      } catch (e) {
+        setDbError(e.message || String(e));
+        if (alive) setProducts([]);
+      }
+    })();
+    return () => { alive = false; };
+  }, [wh, session, profile]);
 
   // ---- load a warehouse-day (opening + movements + physical counts) ----
   const loadDay = useCallback(async (whName, d, prods) => {
@@ -693,11 +726,18 @@ export default function App() {
 
   // ---- opening stock upload (admin) ----
   const [showUpload, setShowUpload] = useState(false);
-  const applyOpening = async (asOn, openMap) => {
+  const applyOpening = async (asOn, openMap, newProds, updates) => {
+    let next = products || [];
+    if (newProds.length || Object.keys(updates).length) {
+      next = next.map((p) => (updates[p.code] ? { ...p, ...updates[p.code] } : p));
+      next = [...next, ...newProds];
+      setProducts(next);
+      await kvSet(prodKey(wh), next);
+    }
     await kvSet(openKey(wh, asOn), openMap);
     if (asOn === date) { setOpening(openMap); }
-    else if (products) loadDay(wh, date, products);
-    alert(`Opening stock set for ${wh} as on ${fmtDate(asOn)} (${Object.keys(openMap).length} products).`);
+    else loadDay(wh, date, next);
+    alert(`${wh}: ${newProds.length} products created, opening stock set as on ${fmtDate(asOn)} for ${Object.keys(openMap).length} products.`);
   };
 
   // ---- export all tabs to one Excel workbook ----
@@ -766,6 +806,12 @@ export default function App() {
           await kvUpsertMany(old.map((r) => ({ key: pre + name + r.key.slice((pre + wh).length), value: r.value })));
           await kvDeleteMany(old.map((r) => r.key));
         }
+      }
+      // move this warehouse's product master too
+      const pm = await kvGetMany([prodKey(wh)]);
+      if (pm[prodKey(wh)]) {
+        await kvSet(prodKey(name), pm[prodKey(wh)]);
+        await kvDeleteMany([prodKey(wh)]);
       }
       const w = warehouses.map((x) => (x === wh ? name : x));
       setWarehouses(w); kvSetBg(K_WAREHOUSES, w);
@@ -907,8 +953,10 @@ export default function App() {
           </div>
 
           <div className="hint">
-            Type into <b style={{ color: activeMv.color }}>{activeMv.label}</b> — columns are <b>Case · Box · Pcs</b>.
-            Closing carries to tomorrow's opening automatically. Switch movement type with the colored buttons.
+            {(products || []).length === 0
+              ? <b>No products in {wh} yet — go to Configuration → ⬆ Upload Opening Stock to load this warehouse's sheet.</b>
+              : <>Type into <b style={{ color: activeMv.color }}>{activeMv.label}</b> — columns are <b>Case · Box · Pcs</b>.
+                Closing carries to tomorrow's opening automatically. Switch movement type with the colored buttons.</>}
           </div>
 
           <div className="gridwrap">
@@ -959,7 +1007,7 @@ export default function App() {
           </div>
 
           <div className="footbar">
-            <div>Showing <b>{rows.length}</b> / {products.length} products</div>
+            <div>Showing <b>{rows.length}</b> / {(products || []).length} products</div>
             <div className="ftot">
               {MOVES.map((m) => (
                 <span key={m.key} style={{ color: m.color }}>{m.label}: <b>{totals.mvTot[m.key]}</b> pcs</span>
@@ -974,7 +1022,7 @@ export default function App() {
       {tab === "stocktake" && (
         <>
           <div className="rcards">
-            <div className="rcard"><div className="rl">Counted</div><div className="rv">{stTotals.counted}<span className="rsub"> / {products.length}</span></div></div>
+            <div className="rcard"><div className="rl">Counted</div><div className="rv">{stTotals.counted}<span className="rsub"> / {(products || []).length}</span></div></div>
             <div className="rcard"><div className="rl">Matched</div><div className="rv" style={{ color: "#1b7f4d" }}>{stTotals.matched}</div></div>
             <div className="rcard"><div className="rl">Short</div><div className="rv" style={{ color: "#b3261e" }}>{stTotals.short}<span className="rsub"> items · {stTotals.shortPcs} pcs</span></div></div>
             <div className="rcard"><div className="rl">Excess</div><div className="rv" style={{ color: "#8a5a00" }}>{stTotals.excess}<span className="rsub"> items · {stTotals.excessPcs} pcs</span></div></div>
@@ -1046,7 +1094,7 @@ export default function App() {
           </div>
 
           <div className="footbar">
-            <div>Showing <b>{rows.length}</b> / {products.length} products</div>
+            <div>Showing <b>{rows.length}</b> / {(products || []).length} products</div>
             <div className="ftot">
               <span style={{ color: "#1b7f4d" }}>Matched: <b>{stTotals.matched}</b></span>
               <span style={{ color: "#b3261e" }}>Short: <b>{stTotals.shortPcs}</b> pcs</span>
@@ -1168,7 +1216,7 @@ export default function App() {
           </div>
 
           <div className="footbar">
-            <div>Showing <b>{rows.length}</b> / {products.length} products</div>
+            <div>Showing <b>{rows.length}</b> / {(products || []).length} products</div>
             <div className="ftot"><span>Retails = MRP ÷ Margin</span><span>RD = Retails ÷ (1 + {config.ourMargin}%)</span><span>Cost = RD ÷ (1 + GST)</span><span>WS Rate = MRP × (1 − WS%)</span></div>
           </div>
         </>
