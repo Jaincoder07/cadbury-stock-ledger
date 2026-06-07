@@ -1882,7 +1882,7 @@ const CSS = `
 .logo { width:42px; height:42px; border-radius:9px; background:#6b1f24; color:#fff; display:grid; place-items:center; font-weight:800; letter-spacing:1px; font-size:14px; box-shadow:0 2px 0 #4a1419; }
 .title { font-weight:800; letter-spacing:2px; font-size:18px; }
 .sub { font-size:11px; opacity:.6; letter-spacing:.5px; }
-.controls { display:flex; align-items:flex-end; gap:8px; flex-wrap:wrap; }
+.controls { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .ctl { display:flex; flex-direction:column; gap:3px; font-size:10px; text-transform:uppercase; letter-spacing:1px; opacity:.85; }
 .ctl select, .ctl input { background:#3a2e22; border:1px solid #54442f; color:#f4efe6; border-radius:6px; padding:6px 8px; font-size:13px; }
 .ghost { background:transparent; border:1px solid #54442f; color:#f4efe6; border-radius:6px; padding:7px 10px; cursor:pointer; font-size:12px; }
