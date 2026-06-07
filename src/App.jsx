@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback, useDeferredValue } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useDeferredValue, useRef } from "react";
 import { supabase, kvGetMany, kvSet, kvSetBg, kvGetLike, kvGetRange, kvUpsertMany, kvDeleteMany, onStorageError } from "./storage";
 import * as XLSX from "xlsx";
 
@@ -630,6 +630,7 @@ export default function App() {
   };
 
   const [dbError, setDbError] = useState(null);
+  const dateRef = useRef(null);
   useEffect(() => { onStorageError((msg) => setDbError(msg)); }, []);
 
   // ---- auth session ----
@@ -1085,26 +1086,24 @@ export default function App() {
           </div>
         </div>
         <div className="controls">
-          <label className="ctl">
-            <span>Warehouse</span>
-            <select value={wh} onChange={(e) => setWh(e.target.value)}>
-              {allowedWh.map((w) => <option key={w}>{w}</option>)}
-            </select>
+          <select className="whsel" value={wh} onChange={(e) => setWh(e.target.value)} title="Warehouse">
+            {allowedWh.map((w) => <option key={w}>{w}</option>)}
+          </select>
+          {isAdmin && <button className="ghost icon" onClick={addWarehouse} title="Add warehouse">＋</button>}
+          {isAdmin && <button className="ghost icon" onClick={renameWarehouse} disabled={renaming} title="Rename this warehouse">{renaming ? "…" : "✎"}</button>}
+          <span className="sep" />
+          <button className="ghost icon" onClick={() => setDate(addDays(date, -1))} title="Previous day">‹</button>
+          <label className="datechip" title="Pick a date"
+            onClick={() => { try { dateRef.current.showPicker(); } catch { dateRef.current.focus(); } }}>
+            {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][new Date(date + "T00:00:00").getDay()]}, {fmtDate(date)}
+            <input ref={dateRef} type="date" value={date} onChange={(e) => setDate(e.target.value)} className="dateinput" tabIndex={-1} />
           </label>
-          {isAdmin && <button className="ghost" onClick={addWarehouse} title="Add warehouse">＋</button>}
-          {isAdmin && <button className="ghost" onClick={renameWarehouse} disabled={renaming} title="Rename this warehouse">{renaming ? "…" : "✎"}</button>}
-          <label className="ctl">
-            <span>Date</span>
-            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
-          </label>
-          <button className="ghost" onClick={() => setDate(addDays(date, -1))}>‹ Prev</button>
-          <button className="ghost" onClick={() => setDate(addDays(date, +1))}>Next ›</button>
-          <button className="ghost" onClick={() => setDate(todayStr())}>Today</button>
-          <span className="datechip">{["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][new Date(date + "T00:00:00").getDay()]}, {fmtDate(date)}</span>
-          <label className="ctl" title={myEmail}>
-            <span>{isAdmin ? "Admin" : "User"}</span>
-            <button className="ghost" onClick={signOut}>{myEmail.split("@")[0]} · Sign Out</button>
-          </label>
+          <button className="ghost icon" onClick={() => setDate(addDays(date, +1))} title="Next day">›</button>
+          {date !== todayStr() && <button className="ghost" onClick={() => setDate(todayStr())}>Today</button>}
+          <span className="sep" />
+          <button className="ghost" onClick={signOut} title={`${myEmail} (${isAdmin ? "admin" : "user"}) — sign out`}>
+            {myEmail.split("@")[0]} ⏻
+          </button>
         </div>
       </div>
 
@@ -1887,7 +1886,12 @@ const CSS = `
 .ctl { display:flex; flex-direction:column; gap:3px; font-size:10px; text-transform:uppercase; letter-spacing:1px; opacity:.85; }
 .ctl select, .ctl input { background:#3a2e22; border:1px solid #54442f; color:#f4efe6; border-radius:6px; padding:6px 8px; font-size:13px; }
 .ghost { background:transparent; border:1px solid #54442f; color:#f4efe6; border-radius:6px; padding:7px 10px; cursor:pointer; font-size:12px; }
-.datechip { background:#54442f; color:#f4efe6; border-radius:6px; padding:8px 12px; font-size:12px; font-weight:700; letter-spacing:.5px; }
+.whsel { background:#3a2e22; border:1px solid #54442f; color:#f4efe6; border-radius:6px; padding:8px 10px; font-size:13px; max-width:180px; }
+.ghost.icon { padding:8px 11px; font-size:14px; line-height:1; }
+.sep { width:1px; height:22px; background:#54442f; margin:0 4px; align-self:center; }
+.datechip { position:relative; background:#54442f; color:#f4efe6; border-radius:6px; padding:8px 12px; font-size:12px; font-weight:700; letter-spacing:.5px; cursor:pointer; white-space:nowrap; }
+.datechip:hover { background:#6b5a3f; }
+.dateinput { position:absolute; inset:0; opacity:0; pointer-events:none; }
 .ghost:hover { background:#3a2e22; }
 
 .tabs { display:flex; align-items:center; gap:4px; padding:0 18px; background:#e7dccb; border-bottom:2px solid #d2c2a8; }
