@@ -1927,7 +1927,10 @@ const CSS = `
 .hfactions { display:flex; gap:6px; margin-bottom:6px; }
 .hfactions button { flex:1; background:#f4efe6; border:1px solid #d2c2a8; border-radius:5px; padding:4px; font-size:11px; cursor:pointer; }
 .hfactions button:hover { background:#e7dccb; }
-.hflist { max-height:200px; overflow:auto; }
+.hflist { max-height:220px; overflow-y:scroll; }
+.hflist::-webkit-scrollbar { width:8px; }
+.hflist::-webkit-scrollbar-thumb { background:#d2c2a8; border-radius:4px; }
+.hflist::-webkit-scrollbar-track { background:#f4efe6; border-radius:4px; }
 .hfitem { display:flex; align-items:center; gap:6px; font-size:12px; padding:3px 2px; color:#2a2018; cursor:pointer; }
 .hfitem:hover { background:#faf6ee; }
 .hfempty { font-size:11px; color:#9a8a72; padding:4px; }
