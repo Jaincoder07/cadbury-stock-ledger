@@ -752,6 +752,14 @@ export default function App() {
     setSavedAt(null);
   };
 
+  // delete stale opening snapshots after a given date so they get recomputed
+  // from the carry-forward chain (a past day changed → old stamps are wrong)
+  const invalidateAfter = async (whName, afterDate) => {
+    const all = await kvGetLike(`cad:open:${whName}:%`);
+    const stale = all.map((r) => r.key).filter((k) => k.slice(-10) > afterDate);
+    await kvDeleteMany(stale);
+  };
+
   // ---- save day ----
   const save = async () => {
     setSaving(true);
@@ -763,6 +771,8 @@ export default function App() {
         kvSet(openKey(wh, date), opening),            // lock opening so it's stable
         kvSet(openKey(wh, addDays(date, 1)), close),  // closing → tomorrow's opening
       ]);
+      // editing a past day makes any later stamped openings wrong — clear them
+      await invalidateAfter(wh, addDays(date, 1));
       setSavedAt(new Date());
       setDbError(null);
     } catch (e) {
@@ -918,6 +928,8 @@ export default function App() {
       saveConfig({ ...config, perSku });
     }
     await kvSet(openKey(wh, asOn), openMap);
+    // a fresh opening invalidates every later stamped opening for this warehouse
+    await invalidateAfter(wh, asOn);
     if (asOn === date) { setOpening(openMap); }
     else loadDay(wh, date, next);
     alert(`${wh}: ${newProds.length} products created, opening stock set as on ${fmtDate(asOn)} for ${Object.keys(openMap).length} products.`);
