@@ -1186,6 +1186,8 @@ export default function App() {
                         );
                       })()}
                     </tfoot>
+                  </table>
+                </div>
                 <div className="footbar">
                   <div><b>{rowsM.length}</b> products with stock/movement</div>
                   <div className="ftot">
