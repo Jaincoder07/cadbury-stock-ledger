@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
-import { supabase, kvGetMany, kvSet, kvSetBg, kvGetLike, kvUpsertMany, kvDeleteMany, onStorageError } from "./storage";
+import { supabase, kvGetMany, kvSet, kvSetBg, kvGetLike, kvGetRange, kvUpsertMany, kvDeleteMany, onStorageError } from "./storage";
 import * as XLSX from "xlsx";
 
 
@@ -101,31 +101,22 @@ function DecCell({ value, onChange, suffix }) {
   );
 }
 
-// resolve a warehouse-day's opening: saved snapshot, else nearest snapshot within
-// 62 days rolled forward through every saved day's movements (handles gap days).
-async function resolveOpening(whName, d, prods, preloaded) {
-  const direct = preloaded?.[openKey(whName, d)];
-  if (direct) return direct;
-  const LOOKBACK = 120;
-  const keys = [openKey(whName, d)];   // the day itself may hold an uploaded snapshot
-  for (let i = 1; i <= LOOKBACK; i++) {
-    const dd = addDays(d, -i);
-    keys.push(openKey(whName, dd), mvKey(whName, dd));
-  }
-  const hist = await kvGetMany(keys);
-  let baseIdx = -1;
-  for (let i = 0; i <= LOOKBACK; i++) {
-    if (hist[openKey(whName, addDays(d, -i))]) { baseIdx = i; break; }
-  }
-  if (baseIdx === 0) return hist[openKey(whName, d)];
-  if (baseIdx < 0) return {};
-  const open = { ...hist[openKey(whName, addDays(d, -baseIdx))] };
+// resolve a warehouse-day's opening: latest uploaded snapshot on/before the day,
+// rolled forward through every saved day's movements since (unlimited history,
+// fetched with two small ranged queries).
+async function resolveOpening(whName, d, prods) {
+  const opens = await kvGetRange(openKey(whName, "0000-00-00"), openKey(whName, d));
+  if (!opens.length) return {};
+  opens.sort((a, b) => (a.key < b.key ? 1 : -1));   // newest first
+  const base = opens[0];
+  const baseDate = base.key.slice(-10);
+  if (baseDate === d) return base.value;
+  const open = { ...base.value };
   const byCode = {};
   prods.forEach((p) => (byCode[p.code] = p));
-  for (let j = baseIdx; j >= 1; j--) {
-    const mv = hist[mvKey(whName, addDays(d, -j))];
-    if (!mv) continue;
-    Object.entries(mv).forEach(([code, row]) => {
+  const mvRows = await kvGetRange(mvKey(whName, baseDate), mvKey(whName, addDays(d, -1)));
+  mvRows.forEach((r) => {
+    Object.entries(r.value || {}).forEach(([code, row]) => {
       const pr = byCode[code];
       if (!pr || !row) return;
       let net = 0;
@@ -135,7 +126,7 @@ async function resolveOpening(whName, d, prods, preloaded) {
       });
       open[code] = (open[code] || 0) + net;
     });
-  }
+  });
   return open;
 }
 
@@ -709,8 +700,8 @@ export default function App() {
   const loadDay = useCallback(async (whName, d, prods) => {
     if (!prods) return;
     try {
-      const m = await kvGetMany([openKey(whName, d), mvKey(whName, d), countKey(whName, d)]);
-      const open = await resolveOpening(whName, d, prods, m);
+      const m = await kvGetMany([mvKey(whName, d), countKey(whName, d)]);
+      const open = await resolveOpening(whName, d, prods);
       setOpening(open);
       setMoves(m[mvKey(whName, d)] || {});
       setCounts(m[countKey(whName, d)] || {});
@@ -837,9 +828,9 @@ export default function App() {
       try {
         const results = [];
         for (const w of targets) {
-          const m = await kvGetMany([prodKey(w), openKey(w, date), mvKey(w, date)]);
+          const m = await kvGetMany([prodKey(w), mvKey(w, date)]);
           const prods = m[prodKey(w)] || [];
-          const open = await resolveOpening(w, date, prods, m);
+          const open = await resolveOpening(w, date, prods);
           results.push({ w, ...aggWarehouse(prods, open, m[mvKey(w, date)] || {}, config) });
         }
         if (alive) setDash(results);

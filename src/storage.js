@@ -41,6 +41,13 @@ export function kvSetBg(key, value) {
   kvSet(key, value).catch(report);
 }
 
+// fetch all keys in a lexicographic range (keys end in YYYY-MM-DD, so date ranges work)
+export async function kvGetRange(fromKey, toKey) {
+  const { data, error } = await supabase.from("kv").select("key,value").gte("key", fromKey).lte("key", toKey);
+  if (error) throw error;
+  return data || [];
+}
+
 // fetch keys matching a SQL LIKE pattern (e.g. "cad:mv:Main Warehouse:%")
 export async function kvGetLike(pattern) {
   const { data, error } = await supabase.from("kv").select("key,value").like("key", pattern);
