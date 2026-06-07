@@ -758,6 +758,9 @@ export default function App() {
                   <th className="grp">Opening</th>
                   {MOVES.map((m) => <th key={m.key} className="num" style={{ color: m.color }}>{m.label}</th>)}
                   <th className="grp closing">Closing</th>
+                  <th className="num closing">Close<br /><span>Pcs</span></th>
+                  <th className="num" style={{ color: "#0a6e7a" }}>Physical<br /><span>Pcs</span></th>
+                  <th className="num">Diff<br /><span>Pcs</span></th>
                   <th className="num">Value</th>
                 </tr>
               </thead>
@@ -767,6 +770,9 @@ export default function App() {
                   const cl = closingPcs(p.code);
                   const cd = fromPcs(cl, p.pcsCase, p.pcsOuter);
                   const mv = moves[p.code] || {};
+                  const ct = counts[p.code];
+                  const phys = ct ? toPcs(ct.c, ct.b, ct.p, p.pcsCase, p.pcsOuter) : null;
+                  const d = ct ? phys - cl : null;
                   return (
                     <tr key={p.code} className={cl < 0 ? "rneg" : ""}>
                       <td className="stick code mono">{p.code}</td>
@@ -779,6 +785,11 @@ export default function App() {
                         return <td key={m.key} className="num dim">{t || ""}</td>;
                       })}
                       <td className={"cbp closing" + (cl < 0 ? " negtxt" : "")}>{cd.c}·{cd.b}·{cd.p}</td>
+                      <td className={"num closing" + (cl < 0 ? " negtxt" : "")}>{cl}</td>
+                      <td className="num" style={{ color: "#0a6e7a" }}>{ct ? phys : "–"}</td>
+                      <td className={"num " + (d === null ? "dim" : d < 0 ? "negtxt" : d > 0 ? "exctxt" : "oktxt")}>
+                        {d === null ? "" : d === 0 ? "✓" : (d > 0 ? "+" : "") + d}
+                      </td>
                       <td className="num">{inr(cl * p.mrp)}</td>
                     </tr>
                   );
