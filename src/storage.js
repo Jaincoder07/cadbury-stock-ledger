@@ -41,6 +41,24 @@ export function kvSetBg(key, value) {
   kvSet(key, value).catch(report);
 }
 
+// fetch keys matching a SQL LIKE pattern (e.g. "cad:mv:Main Warehouse:%")
+export async function kvGetLike(pattern) {
+  const { data, error } = await supabase.from("kv").select("key,value").like("key", pattern);
+  if (error) throw error;
+  return data || [];
+}
+
+export async function kvUpsertMany(rows) {
+  const { error } = await supabase.from("kv").upsert(rows.map((r) => ({ ...r, updated_at: new Date().toISOString() })));
+  if (error) throw error;
+}
+
+export async function kvDeleteMany(keys) {
+  if (!keys.length) return;
+  const { error } = await supabase.from("kv").delete().in("key", keys);
+  if (error) throw error;
+}
+
 // one-time migration: push this browser's old localStorage data up to Supabase
 export async function migrateLocalStorage() {
   const rows = [];

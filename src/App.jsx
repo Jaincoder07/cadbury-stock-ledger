@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
-import { supabase, kvGetMany, kvSet, kvSetBg, migrateLocalStorage, onStorageError } from "./storage";
+import { supabase, kvGetMany, kvSet, kvSetBg, kvGetLike, kvUpsertMany, kvDeleteMany, migrateLocalStorage, onStorageError } from "./storage";
+import * as XLSX from "xlsx";
 
 // Seed products from client's actual Cadbury stock sheet:
 // [code, desc, mrp, pcsOuter (Box=outer), pcsCase, openCase, openBox, openPcs]
@@ -148,6 +149,80 @@ function TextCell({ value, onCommit, width }) {
       onBlur={() => { if (v.trim() !== (value ?? "")) onCommit(v.trim()); }}
       onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
     />
+  );
+}
+
+// ---------- opening stock upload (admin) ----------
+// Sheet format: a header row containing CODE plus CASE / BOX / PCS columns (any of the three).
+function UploadOpeningPanel({ products, wh, onApply, onClose }) {
+  const [asOn, setAsOn] = useState("2026-06-01");
+  const [preview, setPreview] = useState(null);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const parseFile = async (file) => {
+    setErr(""); setPreview(null);
+    try {
+      const wb = XLSX.read(await file.arrayBuffer());
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: "" });
+      // find header row: first row with a cell matching "code"
+      const hi = rows.findIndex((r) => r.some((c) => /code/i.test(String(c))));
+      if (hi < 0) throw new Error("No header row with a CODE column found.");
+      const hdr = rows[hi].map((c) => String(c).toLowerCase().trim());
+      const ci = hdr.findIndex((h) => /code/.test(h));
+      const caseI = hdr.findIndex((h) => /^case|cases/.test(h));
+      const boxI = hdr.findIndex((h) => /^box/.test(h));
+      const pcsI = hdr.findIndex((h) => /^(pcs|pieces|piece)/.test(h));
+      if (caseI < 0 && boxI < 0 && pcsI < 0) throw new Error("No CASE / BOX / PCS quantity columns found.");
+      const byCode = {};
+      products.forEach((p) => (byCode[p.code.toLowerCase()] = p));
+      const open = {}; const unmatched = []; let matched = 0;
+      for (let i = hi + 1; i < rows.length; i++) {
+        const code = String(rows[i][ci] ?? "").trim();
+        if (!code) continue;
+        const p = byCode[code.toLowerCase()];
+        const num = (idx) => (idx >= 0 ? parseInt(rows[i][idx], 10) || 0 : 0);
+        if (!p) { unmatched.push(code); continue; }
+        open[p.code] = toPcs(num(caseI), num(boxI), num(pcsI), p.pcsCase, p.pcsOuter);
+        matched++;
+      }
+      if (!matched) throw new Error("No rows matched any product code.");
+      setPreview({ open, matched, unmatched });
+    } catch (e) {
+      setErr(e.message || String(e));
+    }
+  };
+
+  const apply = async () => {
+    setBusy(true);
+    try {
+      await onApply(asOn, preview.open);
+      onClose();
+    } catch (e) { setErr(e.message || String(e)); }
+    setBusy(false);
+  };
+
+  return (
+    <div className="addpanel">
+      <div className="aprow">
+        <label>Opening as on<input type="date" value={asOn} onChange={(e) => setAsOn(e.target.value)} style={{ width: 140 }} /></label>
+        <label className="wide">Stock sheet (.xlsx / .csv) — columns: CODE, CASE, BOX, PCS
+          <input type="file" accept=".xlsx,.xls,.csv" onChange={(e) => e.target.files[0] && parseFile(e.target.files[0])} />
+        </label>
+        {preview && <button className="save" onClick={apply} disabled={busy}>{busy ? "Applying…" : `Set opening for ${wh}`}</button>}
+        <button className="ghost2" onClick={onClose}>Cancel</button>
+      </div>
+      {preview && (
+        <div className="apwarn" style={{ color: "#1b7f4d" }}>
+          ✓ {preview.matched} products matched — applying will set their opening stock for <b>{wh}</b> as on {asOn}.
+          Products not in the sheet keep opening 0.
+          {preview.unmatched.length > 0 && (
+            <div className="aperr">⚠ {preview.unmatched.length} codes not found (skipped): {preview.unmatched.slice(0, 12).join(", ")}{preview.unmatched.length > 12 ? "…" : ""}</div>
+          )}
+        </div>
+      )}
+      {err && <div className="aperr">{err}</div>}
+    </div>
   );
 }
 
@@ -625,6 +700,97 @@ export default function App() {
     return { counted, matched, short, excess, shortPcs, excessPcs, diffVal };
   }, [products, counts, closingPcs]);
 
+  // ---- opening stock upload (admin) ----
+  const [showUpload, setShowUpload] = useState(false);
+  const applyOpening = async (asOn, openMap) => {
+    await kvSet(openKey(wh, asOn), openMap);
+    if (asOn === date) { setOpening(openMap); }
+    else if (products) loadDay(wh, date, products);
+    alert(`Opening stock set for ${wh} as on ${fmtDate(asOn)} (${Object.keys(openMap).length} products).`);
+  };
+
+  // ---- export all tabs to one Excel workbook ----
+  const exportAll = () => {
+    const wb = XLSX.utils.book_new();
+    const ps = products || [];
+    const mvPcs = (p, key) => {
+      const c = (moves[p.code] || {})[key];
+      return c ? toPcs(c.c, c.b, c.p, p.pcsCase, p.pcsOuter) : 0;
+    };
+    const cbp = (pcs, p) => { const d = fromPcs(pcs, p.pcsCase, p.pcsOuter); return `${d.c}·${d.b}·${d.p}`; };
+
+    // Stock Report
+    const rep = [["Code", "Product", "MRP", "Opening C·B·P", "Opening Pcs", ...MOVES.map((m) => m.label + " Pcs"), "Closing C·B·P", "Closing Pcs", "Physical Pcs", "Diff Pcs", "Value (MRP)"]];
+    ps.forEach((p) => {
+      const o = opening[p.code] || 0, cl = closingPcs(p.code);
+      const ct = counts[p.code];
+      const phys = ct ? toPcs(ct.c, ct.b, ct.p, p.pcsCase, p.pcsOuter) : "";
+      rep.push([p.code, p.desc, p.mrp, cbp(o, p), o, ...MOVES.map((m) => mvPcs(p, m.key)), cbp(cl, p), cl, phys, ct ? phys - cl : "", cl * p.mrp]);
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rep), "Stock Report");
+
+    // Daily Entry (raw C·B·P entries)
+    const ent = [["Code", "Product", ...MOVES.flatMap((m) => [m.label + " Case", "Box", "Pcs"])]];
+    ps.forEach((p) => {
+      const mv = moves[p.code] || {};
+      ent.push([p.code, p.desc, ...MOVES.flatMap((m) => { const c = mv[m.key] || {}; return [c.c || 0, c.b || 0, c.p || 0]; })]);
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(ent), "Daily Entry");
+
+    // Stock Take
+    const st = [["Code", "Product", "System C·B·P", "System Pcs", "Physical C·B·P", "Physical Pcs", "Diff Pcs", "Diff Value (MRP)"]];
+    ps.forEach((p) => {
+      const cl = closingPcs(p.code), ct = counts[p.code];
+      const phys = ct ? toPcs(ct.c, ct.b, ct.p, p.pcsCase, p.pcsOuter) : null;
+      st.push([p.code, p.desc, cbp(cl, p), cl, ct ? `${ct.c}·${ct.b}·${ct.p}` : "not counted", phys ?? "", ct ? phys - cl : "", ct ? (phys - cl) * p.mrp : ""]);
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(st), "Stock Take");
+
+    // Configuration
+    const cf = [["Code", "Product", "MRP", "Box/Case", "Pcs/Box", "Pcs/Case", "Margin", "GST %", "Retails", "RD", "Cost ex-GST", "WS %", "WS Rate", "Cost/Case"]];
+    ps.forEach((p) => {
+      const cfg = config.perSku[p.code] || {};
+      const pr = skuPricing(p.mrp, cfg, config.ourMargin);
+      cf.push([p.code, p.desc, p.mrp, p.pcsOuter > 0 ? +(p.pcsCase / p.pcsOuter).toFixed(2) : "", p.pcsOuter, p.pcsCase,
+        cfg.margin ?? SKU_DEFAULTS.margin, cfg.gst ?? SKU_DEFAULTS.gst, +pr.retail.toFixed(2), +pr.rd.toFixed(2), +pr.cost.toFixed(2),
+        cfg.ws ?? SKU_DEFAULTS.ws, +pr.ws.toFixed(2), +(pr.cost * p.pcsCase).toFixed(2)]);
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cf), "Configuration");
+
+    XLSX.writeFile(wb, `StockLedger_${wh.replace(/[^\w]+/g, "_")}_${date}.xlsx`);
+  };
+
+  // ---- rename warehouse (admin): migrates all day-keys to the new name ----
+  const [renaming, setRenaming] = useState(false);
+  const renameWarehouse = async () => {
+    const name = prompt(`Rename warehouse "${wh}" to:`, wh);
+    if (!name || name === wh) return;
+    if (warehouses.includes(name)) { alert("A warehouse with that name already exists."); return; }
+    if (!window.confirm(`Rename "${wh}" → "${name}"? All its stock history moves with it.`)) return;
+    setRenaming(true);
+    try {
+      for (const pre of ["cad:mv:", "cad:open:", "cad:count:"]) {
+        const old = await kvGetLike(pre + wh + ":%");
+        if (old.length) {
+          await kvUpsertMany(old.map((r) => ({ key: pre + name + r.key.slice((pre + wh).length), value: r.value })));
+          await kvDeleteMany(old.map((r) => r.key));
+        }
+      }
+      const w = warehouses.map((x) => (x === wh ? name : x));
+      setWarehouses(w); kvSetBg(K_WAREHOUSES, w);
+      // update user allotments
+      const nu = {};
+      Object.entries(usersMap).forEach(([em, u]) => {
+        nu[em] = { ...u, warehouses: (u.warehouses || []).map((x) => (x === wh ? name : x)) };
+      });
+      saveUsers(nu);
+      setWh(name);
+    } catch (e) {
+      setDbError("Rename failed: " + (e.message || e));
+    }
+    setRenaming(false);
+  };
+
   // ---- warehouse management ----
   const addWarehouse = async () => {
     const name = prompt("New warehouse name:");
@@ -694,6 +860,7 @@ export default function App() {
             </select>
           </label>
           {isAdmin && <button className="ghost" onClick={addWarehouse} title="Add warehouse">＋</button>}
+          {isAdmin && <button className="ghost" onClick={renameWarehouse} disabled={renaming} title="Rename this warehouse">{renaming ? "…" : "✎"}</button>}
           <label className="ctl">
             <span>Date</span>
             <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
@@ -716,6 +883,7 @@ export default function App() {
         <button className={tab === "config" ? "tab on" : "tab"} onClick={() => setTab("config")}>Configuration</button>
         {isAdmin && <button className={tab === "users" ? "tab on" : "tab"} onClick={() => setTab("users")}>Users</button>}
         <div className="spacer" />
+        <button className="ghost2" style={{ marginRight: 8 }} onClick={exportAll} title="Download all tabs as one Excel file">⬇ Export</button>
         {!["config", "stocktake", "users"].includes(tab) && (
           <div className="savebox">
             {savedAt && <span className="saved">✓ saved {savedAt.toLocaleTimeString()}</span>}
@@ -915,9 +1083,17 @@ export default function App() {
                 : <b>{config.ourMargin}%</b>}
             </label>
             <button className="save" onClick={() => setShowAdd(!showAdd)}>{showAdd ? "✕ Close" : "＋ Add Product"}</button>
+            {isAdmin && (
+              <button className="ghost2" onClick={() => setShowUpload(!showUpload)}>
+                {showUpload ? "✕ Close upload" : "⬆ Upload Opening Stock"}
+              </button>
+            )}
           </div>
 
           {showAdd && <AddProductPanel products={products} onAdd={addProduct} onClose={() => setShowAdd(false)} />}
+          {showUpload && isAdmin && (
+            <UploadOpeningPanel products={products} wh={wh} onApply={applyOpening} onClose={() => setShowUpload(false)} />
+          )}
 
           <div className="hint">
             Rows are read-only — click <b>✎ Edit</b> at the end of a row to change
