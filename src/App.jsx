@@ -17,16 +17,18 @@ const MOVES = [
 // ---------- helpers ----------
 const todayStr = () => {
   const d = new Date();
-  return d.toISOString().slice(0, 10);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 };
 const fmtDate = (s) => {
   const [y, m, dd] = s.split("-");
   const mo = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][parseInt(m,10)-1];
   return `${dd}-${mo}-${y}`;
 };
+// pure calendar arithmetic — no timezone conversions (the old version shifted
+// through UTC, which skipped/repeated days for anyone east of Greenwich)
 const addDays = (s, n) => {
-  const d = new Date(s + "T00:00:00");
-  d.setDate(d.getDate() + n);
+  const [y, m, dd] = s.split("-").map(Number);
+  const d = new Date(Date.UTC(y, m - 1, dd + n));
   return d.toISOString().slice(0, 10);
 };
 const inr = (n) => "₹" + Math.round(n).toLocaleString("en-IN");
