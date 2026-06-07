@@ -95,6 +95,43 @@ function DecCell({ value, onChange, suffix }) {
   );
 }
 
+// resolve a warehouse-day's opening: saved snapshot, else nearest snapshot within
+// 62 days rolled forward through every saved day's movements (handles gap days).
+async function resolveOpening(whName, d, prods, preloaded) {
+  const direct = preloaded?.[openKey(whName, d)];
+  if (direct) return direct;
+  const LOOKBACK = 62;
+  const keys = [];
+  for (let i = 1; i <= LOOKBACK; i++) {
+    const dd = addDays(d, -i);
+    keys.push(openKey(whName, dd), mvKey(whName, dd));
+  }
+  const hist = await kvGetMany(keys);
+  let baseIdx = -1;
+  for (let i = 1; i <= LOOKBACK; i++) {
+    if (hist[openKey(whName, addDays(d, -i))]) { baseIdx = i; break; }
+  }
+  if (baseIdx < 0) return {};
+  const open = { ...hist[openKey(whName, addDays(d, -baseIdx))] };
+  const byCode = {};
+  prods.forEach((p) => (byCode[p.code] = p));
+  for (let j = baseIdx; j >= 1; j--) {
+    const mv = hist[mvKey(whName, addDays(d, -j))];
+    if (!mv) continue;
+    Object.entries(mv).forEach(([code, row]) => {
+      const pr = byCode[code];
+      if (!pr || !row) return;
+      let net = 0;
+      MOVES.forEach((mm) => {
+        const cell = row[mm.key];
+        if (cell) net += mm.sign * toPcs(cell.c, cell.b, cell.p, pr.pcsCase, pr.pcsOuter);
+      });
+      open[code] = (open[code] || 0) + net;
+    });
+  }
+  return open;
+}
+
 // ---------- dashboard aggregation ----------
 function aggWarehouse(prods, open, mvs, config) {
   let openVal = 0, closeVal = 0, costVal = 0, neg = 0, withStock = 0;
@@ -612,50 +649,22 @@ export default function App() {
   }, [wh, session, profile]);
 
   // ---- load a warehouse-day (opening + movements + physical counts) ----
+  // Opening = this day's snapshot if saved; otherwise walk back through up to 62
+  // previous days, take the nearest saved opening, and roll every saved day's
+  // movements forward — so closing always carries to the next day, even across
+  // gaps (Sundays, missed days) and even if "Save Day" wasn't pressed yet today.
   const loadDay = useCallback(async (whName, d, prods) => {
     if (!prods) return;
-    const prev = addDays(d, -1);
-    let m;
     try {
-      m = await kvGetMany([openKey(whName, d), mvKey(whName, d), countKey(whName, d), openKey(whName, prev), mvKey(whName, prev)]);
+      const m = await kvGetMany([openKey(whName, d), mvKey(whName, d), countKey(whName, d)]);
+      const open = await resolveOpening(whName, d, prods, m);
+      setOpening(open);
+      setMoves(m[mvKey(whName, d)] || {});
+      setCounts(m[countKey(whName, d)] || {});
+      setDbError(null);
     } catch (e) {
       setDbError(e.message || String(e));
-      return;
     }
-    // opening: try stored snapshot; else previous day's closing; else product master opening
-    let open = m[openKey(whName, d)];
-    if (!open) {
-      const prevMoves = m[mvKey(whName, prev)];
-      const prevOpen = m[openKey(whName, prev)];
-      if (prevMoves || prevOpen) {
-        // compute previous closing
-        open = {};
-        prods.forEach((pr) => {
-          const o = (prevOpen && prevOpen[pr.code] != null)
-            ? prevOpen[pr.code]
-            : toPcs(pr.openCase, pr.openBox, pr.openPcs, pr.pcsCase, pr.pcsOuter);
-          let net = 0;
-          const mv = prevMoves && prevMoves[pr.code];
-          if (mv) {
-            MOVES.forEach((m) => {
-              const cell = mv[m.key];
-              if (cell) net += m.sign * toPcs(cell.c, cell.b, cell.p, pr.pcsCase, pr.pcsOuter);
-            });
-          }
-          open[pr.code] = o + net;
-        });
-      } else {
-        // first ever day → master opening
-        open = {};
-        prods.forEach((pr) => {
-          open[pr.code] = toPcs(pr.openCase, pr.openBox, pr.openPcs, pr.pcsCase, pr.pcsOuter);
-        });
-      }
-    }
-    setOpening(open);
-    setMoves(m[mvKey(whName, d)] || {});
-    setCounts(m[countKey(whName, d)] || {});
-    setDbError(null);
   }, []);
 
   useEffect(() => { if (products) loadDay(wh, date, products); }, [wh, date, products, loadDay]);
@@ -768,23 +777,11 @@ export default function App() {
     (async () => {
       setDash(null);
       try {
-        const prev = addDays(date, -1);
         const results = [];
         for (const w of targets) {
-          const m = await kvGetMany([prodKey(w), openKey(w, date), mvKey(w, date), openKey(w, prev), mvKey(w, prev)]);
+          const m = await kvGetMany([prodKey(w), openKey(w, date), mvKey(w, date)]);
           const prods = m[prodKey(w)] || [];
-          let open = m[openKey(w, date)];
-          if (!open) {
-            open = {};
-            const pm = m[mvKey(w, prev)], po = m[openKey(w, prev)];
-            if (pm || po) prods.forEach((pr) => {
-              const o = po && po[pr.code] != null ? po[pr.code] : 0;
-              let net = 0;
-              const mv = pm && pm[pr.code];
-              if (mv) MOVES.forEach((mm) => { const c = mv[mm.key]; if (c) net += mm.sign * toPcs(c.c, c.b, c.p, pr.pcsCase, pr.pcsOuter); });
-              open[pr.code] = o + net;
-            });
-          }
+          const open = await resolveOpening(w, date, prods, m);
           results.push({ w, ...aggWarehouse(prods, open, m[mvKey(w, date)] || {}, config) });
         }
         if (alive) setDash(results);
@@ -1171,8 +1168,24 @@ export default function App() {
                         );
                       })}
                     </tbody>
-                  </table>
-                </div>
+                    <tfoot>
+                      {(() => {
+                        const t = { open: 0, net: 0, cl: 0, val: 0 };
+                        rowsM.forEach((r) => { t.open += r.o; t.net += r.net; t.cl += r.cl; t.val += r.cl * r.p.mrp; });
+                        return (
+                          <tr className="trow">
+                            <td className="stick code">TOTAL</td>
+                            <td className="stick desc">{rowsM.length} products</td>
+                            <td className="num">{t.open}</td>
+                            {MOVES.map((m) => <td key={m.key} className="num" style={{ color: m.color }}>{tot(m.key) || ""}</td>)}
+                            <td className={"num " + (t.net < 0 ? "negtxt" : t.net > 0 ? "oktxt" : "")}>{t.net !== 0 ? (t.net > 0 ? "+" : "") + t.net : ""}</td>
+                            <td></td>
+                            <td className="num">{t.cl}</td>
+                            <td className="num">{inr(t.val)}</td>
+                          </tr>
+                        );
+                      })()}
+                    </tfoot>
                 <div className="footbar">
                   <div><b>{rowsM.length}</b> products with stock/movement</div>
                   <div className="ftot">
@@ -1534,6 +1547,34 @@ export default function App() {
                   );
                 })}
               </tbody>
+              <tfoot>
+                {(() => {
+                  const t = { open: 0, mv: {}, cl: 0, phys: 0, diff: 0, val: 0 };
+                  MOVES.forEach((m) => (t.mv[m.key] = 0));
+                  rows.forEach((p) => {
+                    const o = opening[p.code] || 0, cl = closingPcs(p.code);
+                    t.open += o; t.cl += cl; t.val += cl * p.mrp;
+                    const mv = moves[p.code] || {};
+                    MOVES.forEach((m) => { const c = mv[m.key]; if (c) t.mv[m.key] += toPcs(c.c, c.b, c.p, p.pcsCase, p.pcsOuter); });
+                    const ct = counts[p.code];
+                    if (ct) { const ph = toPcs(ct.c, ct.b, ct.p, p.pcsCase, p.pcsOuter); t.phys += ph; t.diff += ph - cl; }
+                  });
+                  return (
+                    <tr className="trow">
+                      <td className="stick code">TOTAL</td>
+                      <td className="stick desc">{rows.length} products</td>
+                      <td></td>
+                      <td className="num">{t.open} pcs</td>
+                      {MOVES.map((m) => <td key={m.key} className="num" style={{ color: m.color }}>{t.mv[m.key] || ""}</td>)}
+                      <td></td>
+                      <td className="num">{t.cl}</td>
+                      <td className="num" style={{ color: "#0a6e7a" }}>{t.phys || ""}</td>
+                      <td className={"num " + (t.diff < 0 ? "negtxt" : t.diff > 0 ? "exctxt" : "")}>{t.diff !== 0 ? (t.diff > 0 ? "+" : "") + t.diff : ""}</td>
+                      <td className="num">{inr(t.val)}</td>
+                    </tr>
+                  );
+                })()}
+              </tfoot>
             </table>
           </div>
         </div>
@@ -1620,6 +1661,8 @@ const CSS = `
 .dwrap { display:inline-flex; align-items:center; gap:2px; }
 .dcell { width:52px; }
 .dsuf { font-size:10px; color:#9a8a72; }
+.trow td { position:sticky; bottom:0; background:#efe6d6 !important; font-weight:700; border-top:2px solid #d2c2a8; z-index:2; }
+.trow td.stick { z-index:3; }
 .rneg td { background:#fdecec !important; }
 .negtxt { color:#b3261e !important; }
 .rexc td { background:#fdf6e3 !important; }
