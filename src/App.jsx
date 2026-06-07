@@ -407,6 +407,48 @@ function UsersPanel({ usersMap, saveUsers, warehouses, myEmail }) {
   );
 }
 
+// ---------- excel-style header filter ----------
+function FilterTh({ label, sub, col, values, selected, openCol, setOpenCol, onApply, thClass }) {
+  const [q, setQ] = useState("");
+  const open = openCol === col;
+  const active = selected != null;
+  const shown = values.filter((v) => !q || String(v).toLowerCase().includes(q.toLowerCase()));
+  const isChecked = (v) => !selected || selected.includes(String(v));
+  const toggle = (v) => {
+    const cur = selected ? [...selected] : values.map(String);
+    const sv = String(v);
+    const next = cur.includes(sv) ? cur.filter((x) => x !== sv) : [...cur, sv];
+    onApply(next.length === values.length ? null : next);
+  };
+  return (
+    <th className={(thClass || "num") + (open ? " fopen" : "")}>
+      <span className="hfhead">
+        {label}{sub && <><br /><span>{sub}</span></>}
+        <button className={"hfbtn" + (active ? " on" : "")} title="Filter"
+          onClick={(e) => { e.stopPropagation(); setQ(""); setOpenCol(open ? null : col); }}>▼</button>
+      </span>
+      {open && (
+        <div className="hfpop" onClick={(e) => e.stopPropagation()}>
+          <input className="hfsearch" placeholder="Search…" value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
+          <div className="hfactions">
+            <button onClick={() => onApply(null)}>Select all</button>
+            <button onClick={() => onApply([])}>Clear</button>
+          </div>
+          <div className="hflist">
+            {shown.map((v) => (
+              <label key={String(v)} className="hfitem">
+                <input type="checkbox" checked={isChecked(v)} onChange={() => toggle(v)} />
+                {String(v)}
+              </label>
+            ))}
+            {shown.length === 0 && <div className="hfempty">No values</div>}
+          </div>
+        </div>
+      )}
+    </th>
+  );
+}
+
 // ---------- add product panel ----------
 function AddProductPanel({ products, onAdd, onClose }) {
   const [f, setF] = useState({ code: "", desc: "", mrp: "", boxes: "", pcsOuter: "" });
@@ -499,8 +541,10 @@ export default function App() {
     saveConfig(next);
   };
   const [showAdd, setShowAdd] = useState(false);
-  const [cfgMrp, setCfgMrp] = useState("");        // config tab: filter by MRP ("" = all)
-  const [cfgFilter, setCfgFilter] = useState("all"); // all | custom | wsloss
+  // config tab: excel-style column filters — col -> array of selected values (null = all)
+  const [cfgSel, setCfgSel] = useState({});
+  const [cfgOpenF, setCfgOpenF] = useState(null);
+  const setColFilter = (col) => (arr) => setCfgSel((prev) => ({ ...prev, [col]: arr }));
 
   // ---- physical stock take (per warehouse-day, auto-saved) ----
   const [counts, setCounts] = useState({});          // code -> {c,b,p}; row present = counted (loaded in loadDay)
@@ -1564,17 +1608,9 @@ export default function App() {
                 ? <DecCell value={config.ourMargin} suffix="%" onChange={(v) => saveConfig({ ...config, ourMargin: v })} />
                 : <b>{config.ourMargin}%</b>}
             </label>
-            <select value={cfgMrp} onChange={(e) => setCfgMrp(e.target.value)}
-              style={{ padding: "8px 10px", borderRadius: 7, border: "1px solid #d2c2a8", background: "#fff", fontSize: 13 }}>
-              <option value="">All MRPs</option>
-              {[...new Set((products || []).map((p) => p.mrp))].sort((a, b) => a - b).map((m) => <option key={m} value={m}>₹{m}</option>)}
-            </select>
-            <select value={cfgFilter} onChange={(e) => setCfgFilter(e.target.value)}
-              style={{ padding: "8px 10px", borderRadius: 7, border: "1px solid #d2c2a8", background: "#fff", fontSize: 13 }}>
-              <option value="all">All products</option>
-              <option value="custom">Custom margins only</option>
-              <option value="wsloss">WS loss-making</option>
-            </select>
+            {Object.values(cfgSel).some((v) => v != null) && (
+              <button className="ghost2" onClick={() => setCfgSel({})}>✕ Clear filters</button>
+            )}
             <button className="save" onClick={() => setShowAdd(!showAdd)}>{showAdd ? "✕ Close" : "＋ Add Product"}</button>
             {isAdmin && (
               <button className="ghost2" onClick={() => setShowUpload(!showUpload)}>
@@ -1595,22 +1631,43 @@ export default function App() {
             {" "}Retails = MRP ÷ Margin · RD = Retails ÷ (1 + our %) · Cost = RD ÷ (1 + GST) — used for stock value.
           </div>
 
+          {(() => {
+            // excel-style column filters: value getters + distinct lists
+            const getVal = {
+              mrp: (p) => p.mrp,
+              boxcase: (p) => (p.pcsOuter > 0 ? (p.pcsCase / p.pcsOuter).toFixed(1).replace(/\.0$/, "") : "–"),
+              pcsbox: (p) => p.pcsOuter || "–",
+              pcscase: (p) => p.pcsCase || "–",
+              margin: (p) => config.perSku[p.code]?.margin ?? SKU_DEFAULTS.margin,
+              gst: (p) => config.perSku[p.code]?.gst ?? SKU_DEFAULTS.gst,
+              ws: (p) => config.perSku[p.code]?.ws ?? SKU_DEFAULTS.ws,
+            };
+            const distinct = (col) => [...new Set(rows.map(getVal[col]))].sort((a, b) =>
+              (typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b), undefined, { numeric: true })));
+            const rowsC = rows.filter((p) =>
+              Object.entries(cfgSel).every(([col, arr]) => arr == null || arr.includes(String(getVal[col](p)))));
+            const fth = (label, sub, col, thClass) => (
+              <FilterTh label={label} sub={sub} col={col} thClass={thClass} values={distinct(col)}
+                selected={cfgSel[col] ?? null} openCol={cfgOpenF} setOpenCol={setCfgOpenF} onApply={setColFilter(col)} />
+            );
+            return (<>
           <div className="gridwrap">
+            {cfgOpenF && <div className="hfback" onClick={() => setCfgOpenF(null)} />}
             <table className="grid">
               <thead>
                 <tr>
                   <th className="stick code">Code</th>
                   <th className="stick desc">Product</th>
-                  <th className="num">MRP</th>
-                  <th className="num">Box/Case</th>
-                  <th className="num">Pcs/Box</th>
-                  <th className="num">Pcs/Case<br /><span>auto</span></th>
-                  <th>Margin</th>
-                  <th>GST %</th>
+                  {fth("MRP", null, "mrp")}
+                  {fth("Box/Case", null, "boxcase")}
+                  {fth("Pcs/Box", null, "pcsbox")}
+                  {fth("Pcs/Case", "auto", "pcscase")}
+                  {fth("Margin", null, "margin", "")}
+                  {fth("GST %", null, "gst", "")}
                   <th className="num">Retails</th>
                   <th className="num">RD</th>
                   <th className="num closing">Cost ex-GST</th>
-                  <th>WS %</th>
+                  {fth("WS %", null, "ws", "")}
                   <th className="num">WS Rate</th>
                   <th className="num">Cost/Case</th>
                   <th className="num closing">Profit/Pc<br /><span>Retail</span></th>
@@ -1619,15 +1676,7 @@ export default function App() {
                 </tr>
               </thead>
               <tbody>
-                {rows.filter((p) => {
-                  if (cfgMrp && p.mrp !== +cfgMrp) return false;
-                  if (cfgFilter === "custom") {
-                    const c = config.perSku[p.code];
-                    if (!c || (c.margin == null && c.ws == null && c.gst == null)) return false;
-                  }
-                  if (cfgFilter === "wsloss" && skuPricing(p.mrp, config.perSku[p.code] || {}, config.ourMargin).profitW >= 0) return false;
-                  return true;
-                }).map((p) => {
+                {rowsC.map((p) => {
                   const cfg = config.perSku[p.code] || {};
                   const pr = skuPricing(p.mrp, cfg, config.ourMargin);
                   const editing = editRow === p.code;
@@ -1682,9 +1731,11 @@ export default function App() {
           </div>
 
           <div className="footbar">
-            <div>Showing <b>{rows.length}</b> / {(products || []).length} products</div>
+            <div>Showing <b>{rowsC.length}</b> / {(products || []).length} products{Object.values(cfgSel).some((v) => v != null) && <span className="dim"> · column filters active</span>}</div>
             <div className="ftot"><span>Retails = MRP ÷ Margin</span><span>RD = Retails ÷ (1 + {config.ourMargin}%)</span><span>Cost = RD ÷ (1 + GST)</span><span>WS Rate = MRP × (1 − WS%)</span></div>
           </div>
+            </>);
+          })()}
         </>
       )}
 
@@ -1867,6 +1918,20 @@ const CSS = `
 .dwrap { display:inline-flex; align-items:center; gap:2px; }
 .dcell { width:52px; }
 .dsuf { font-size:10px; color:#9a8a72; }
+.hfhead { position:relative; display:inline-block; }
+.hfbtn { background:transparent; border:none; cursor:pointer; font-size:8px; color:#9a8a72; padding:1px 3px; margin-left:3px; vertical-align:middle; }
+.hfbtn.on { color:#fff; background:#6b1f24; border-radius:3px; }
+.grid thead th.fopen { z-index:8 !important; }
+.hfpop { position:absolute; top:100%; right:-10px; z-index:60; background:#fff; border:1px solid #d2c2a8; border-radius:8px; box-shadow:0 6px 20px rgba(42,32,24,.18); width:180px; padding:8px; text-align:left; text-transform:none; letter-spacing:0; font-weight:400; }
+.hfsearch { width:100%; border:1px solid #d2c2a8; border-radius:5px; padding:5px 7px; font-size:12px; margin-bottom:6px; }
+.hfactions { display:flex; gap:6px; margin-bottom:6px; }
+.hfactions button { flex:1; background:#f4efe6; border:1px solid #d2c2a8; border-radius:5px; padding:4px; font-size:11px; cursor:pointer; }
+.hfactions button:hover { background:#e7dccb; }
+.hflist { max-height:200px; overflow:auto; }
+.hfitem { display:flex; align-items:center; gap:6px; font-size:12px; padding:3px 2px; color:#2a2018; cursor:pointer; }
+.hfitem:hover { background:#faf6ee; }
+.hfempty { font-size:11px; color:#9a8a72; padding:4px; }
+.hfback { position:fixed; inset:0; z-index:50; }
 .trow td { position:sticky; bottom:0; background:#efe6d6 !important; font-weight:700; border-top:2px solid #d2c2a8; z-index:2; }
 .trow td.stick { z-index:3; }
 .rneg td { background:#fdecec !important; }
