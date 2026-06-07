@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
+import { kvGetMany, kvSet, kvSetBg, migrateLocalStorage, onStorageError } from "./storage";
 
 // Seed products from client's actual Cadbury stock sheet:
 // [code, desc, mrp, pcsOuter (Box=outer), pcsCase, openCase, openBox, openPcs]
@@ -70,13 +71,10 @@ const mvKey = (wh, date) => `cad:mv:${wh}:${date}`;       // movements for a war
 const openKey = (wh, date) => `cad:open:${wh}:${date}`;   // opening snapshot (carry)
 const countKey = (wh, date) => `cad:count:${wh}:${date}`; // physical stock-take counts
 
-function sGet(key) {
-  try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : null; }
-  catch { return null; }
-}
-function sSet(key, val) {
-  try { localStorage.setItem(key, JSON.stringify(val)); return true; }
-  catch { return false; }
+// storage now lives in Supabase (src/storage.js) — shared across all devices/users.
+// localStorage is only read once, to migrate old single-browser data up to the cloud.
+function localHasOldData() {
+  try { return !!localStorage.getItem(K_PRODUCTS); } catch { return false; }
 }
 
 // ---------- tiny decimal cell (for config: margins, GST %) ----------
@@ -188,7 +186,7 @@ export default function App() {
   const [config, setConfig] = useState(CONFIG_DEFAULT);
 
   // config is not day-based — persist immediately on every change
-  const saveConfig = (next) => { setConfig(next); sSet(K_CONFIG, next); };
+  const saveConfig = (next) => { setConfig(next); kvSetBg(K_CONFIG, next); };
   const setSkuCfg = (code, field, val) => {
     const next = { ...config, perSku: { ...config.perSku, [code]: { ...(config.perSku[code] || {}), [field]: val } } };
     saveConfig(next);
@@ -196,13 +194,12 @@ export default function App() {
   const [showAdd, setShowAdd] = useState(false);
 
   // ---- physical stock take (per warehouse-day, auto-saved) ----
-  const [counts, setCounts] = useState({});          // code -> {c,b,p}; row present = counted
+  const [counts, setCounts] = useState({});          // code -> {c,b,p}; row present = counted (loaded in loadDay)
   const [onlyDiff, setOnlyDiff] = useState(false);
-  useEffect(() => { setCounts(sGet(countKey(wh, date)) || {}); }, [wh, date]);
   const setCount = (code, dim, val) => {
     setCounts((prev) => {
       const next = { ...prev, [code]: { ...(prev[code] || { c: 0, b: 0, p: 0 }), [dim]: val } };
-      sSet(countKey(wh, date), next);
+      kvSetBg(countKey(wh, date), next);
       return next;
     });
   };
@@ -210,7 +207,7 @@ export default function App() {
     setCounts((prev) => {
       const next = { ...prev };
       delete next[code];
-      sSet(countKey(wh, date), next);
+      kvSetBg(countKey(wh, date), next);
       return next;
     });
   };
@@ -219,7 +216,7 @@ export default function App() {
   const updateProduct = (code, fields) => {
     setProducts((prev) => {
       const next = prev.map((p) => (p.code === code ? { ...p, ...fields } : p));
-      sSet(K_PRODUCTS, next);
+      kvSetBg(K_PRODUCTS, next);
       return next;
     });
   };
@@ -241,7 +238,7 @@ export default function App() {
   const addProduct = (np) => {
     setProducts((prev) => {
       const next = [...prev, np];
-      sSet(K_PRODUCTS, next);
+      kvSetBg(K_PRODUCTS, next);
       return next;
     });
     // make its opening stock visible on the currently loaded day
@@ -249,38 +246,59 @@ export default function App() {
     if (op) setOpening((prev) => ({ ...prev, [np.code]: op }));
   };
 
-  // ---- load products + warehouses once ----
+  const [dbError, setDbError] = useState(null);
+  useEffect(() => { onStorageError((msg) => setDbError(msg)); }, []);
+
+  // ---- load products + warehouses + config from Supabase once ----
   useEffect(() => {
-    (() => {
-      let p = sGet(K_PRODUCTS);
-      if (!p) {
-        p = SEED.map((r) => ({
-          code: r[0], desc: r[1], mrp: r[2],
-          pcsOuter: r[3], pcsCase: r[4],
-          openCase: r[5], openBox: r[6], openPcs: r[7],
-        }));
-        sSet(K_PRODUCTS, p);
+    (async () => {
+      try {
+        let m = await kvGetMany([K_PRODUCTS, K_WAREHOUSES, K_CONFIG]);
+        // first run from a browser that has old localStorage data → migrate it up
+        if (!m[K_PRODUCTS] && localHasOldData()) {
+          await migrateLocalStorage();
+          m = await kvGetMany([K_PRODUCTS, K_WAREHOUSES, K_CONFIG]);
+        }
+        let p = m[K_PRODUCTS];
+        if (!p) {
+          p = SEED.map((r) => ({
+            code: r[0], desc: r[1], mrp: r[2],
+            pcsOuter: r[3], pcsCase: r[4],
+            openCase: r[5], openBox: r[6], openPcs: r[7],
+          }));
+          await kvSet(K_PRODUCTS, p);
+        }
+        setProducts(p);
+        let w = m[K_WAREHOUSES];
+        if (!w) { w = WAREHOUSES_DEFAULT; kvSetBg(K_WAREHOUSES, w); }
+        setWarehouses(w);
+        setWh(w[0]);
+        const cfg = m[K_CONFIG];
+        if (cfg) setConfig({ ...CONFIG_DEFAULT, ...cfg, perSku: cfg.perSku || {} });
+        setDbError(null);
+      } catch (e) {
+        setDbError(e.message || String(e));
       }
-      setProducts(p);
-      let w = sGet(K_WAREHOUSES);
-      if (!w) { w = WAREHOUSES_DEFAULT; sSet(K_WAREHOUSES, w); }
-      setWarehouses(w);
-      setWh(w[0]);
-      const cfg = sGet(K_CONFIG);
-      if (cfg) setConfig({ ...CONFIG_DEFAULT, ...cfg, perSku: cfg.perSku || {} });
       setLoading(false);
     })();
   }, []);
 
-  // ---- load a warehouse-day (opening + movements) ----
-  const loadDay = useCallback((whName, d, prods) => {
+  // ---- load a warehouse-day (opening + movements + physical counts) ----
+  const loadDay = useCallback(async (whName, d, prods) => {
     if (!prods) return;
+    const prev = addDays(d, -1);
+    let m;
+    try {
+      m = await kvGetMany([openKey(whName, d), mvKey(whName, d), countKey(whName, d), openKey(whName, prev), mvKey(whName, prev)]);
+    } catch (e) {
+      setDbError(e.message || String(e));
+      return;
+    }
     // opening: try stored snapshot; else previous day's closing; else product master opening
-    let open = sGet(openKey(whName, d));
+    let open = m[openKey(whName, d)];
     if (!open) {
-      const prev = addDays(d, -1);
-      const prevMoves = sGet(mvKey(whName, prev));
-      const prevOpen = sGet(openKey(whName, prev));
+      const prevMoves = m[mvKey(whName, prev)];
+      const prevOpen = m[openKey(whName, prev)];
       if (prevMoves || prevOpen) {
         // compute previous closing
         open = {};
@@ -307,8 +325,9 @@ export default function App() {
       }
     }
     setOpening(open);
-    const mv = (sGet(mvKey(whName, d))) || {};
-    setMoves(mv);
+    setMoves(m[mvKey(whName, d)] || {});
+    setCounts(m[countKey(whName, d)] || {});
+    setDbError(null);
   }, []);
 
   useEffect(() => { if (products) loadDay(wh, date, products); }, [wh, date, products, loadDay]);
@@ -345,16 +364,22 @@ export default function App() {
   };
 
   // ---- save day ----
-  const save = () => {
+  const save = async () => {
     setSaving(true);
-    sSet(mvKey(wh, date), moves);
-    sSet(openKey(wh, date), opening); // lock opening so it's stable
-    // also push closing as next day's opening snapshot
-    const close = {};
-    (products || []).forEach((pr) => { close[pr.code] = closingPcs(pr.code); });
-    sSet(openKey(wh, addDays(date, 1)), close);
+    try {
+      const close = {};
+      (products || []).forEach((pr) => { close[pr.code] = closingPcs(pr.code); });
+      await Promise.all([
+        kvSet(mvKey(wh, date), moves),
+        kvSet(openKey(wh, date), opening),            // lock opening so it's stable
+        kvSet(openKey(wh, addDays(date, 1)), close),  // closing → tomorrow's opening
+      ]);
+      setSavedAt(new Date());
+      setDbError(null);
+    } catch (e) {
+      setDbError("Save failed: " + (e.message || e));
+    }
     setSaving(false);
-    setSavedAt(new Date());
   };
 
   // ---- filtered rows ----
@@ -411,11 +436,11 @@ export default function App() {
     if (!name) return;
     if (warehouses.includes(name)) { alert("Already exists"); return; }
     const w = [...warehouses, name];
-    setWarehouses(w); sSet(K_WAREHOUSES, w); setWh(name);
+    setWarehouses(w); kvSetBg(K_WAREHOUSES, w); setWh(name);
   };
 
   if (loading) return (
-    <div style={{ padding: 40, fontFamily: "monospace", color: "#5b4a3a" }}>Loading stock data…</div>
+    <div style={{ padding: 40, fontFamily: "monospace", color: "#5b4a3a" }}>Loading stock data from cloud…</div>
   );
 
   const activeMv = MOVES.find((m) => m.key === activeMove);
@@ -423,6 +448,13 @@ export default function App() {
   return (
     <div className="wrap">
       <style>{CSS}</style>
+
+      {dbError && (
+        <div className="dberr">
+          ⚠ Database error: {dbError} — your last change may not be saved.
+          <button className="ghost2" style={{ marginLeft: 10 }} onClick={() => window.location.reload()}>Reload</button>
+        </div>
+      )}
 
       {/* ===== top bar ===== */}
       <div className="topbar">
@@ -858,6 +890,8 @@ const CSS = `
 .inp { padding:1px 3px; text-align:center; }
 .ncell { width:48px; border:1px solid #e0d4bf; border-radius:4px; padding:3px 4px; text-align:center; font-size:12.5px; background:#fffdf8; font-variant-numeric:tabular-nums; }
 .ncell:focus { outline:none; border-color:#6b1f24; background:#fff; box-shadow:0 0 0 2px rgba(107,31,36,.12); }
+.dberr { background:#b3261e; color:#fff; padding:9px 18px; font-size:13px; font-weight:600; display:flex; align-items:center; }
+.dberr .ghost2 { color:#fff; border-color:rgba(255,255,255,.5); }
 .addpanel { margin:0 18px 10px; padding:12px 14px; background:#fff; border:1.5px solid #6b1f24; border-radius:9px; }
 .aprow { display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; }
 .aprow label { display:flex; flex-direction:column; gap:3px; font-size:10px; text-transform:uppercase; letter-spacing:.6px; color:#6b5a45; font-weight:600; }
