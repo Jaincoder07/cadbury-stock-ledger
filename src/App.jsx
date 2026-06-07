@@ -57,14 +57,18 @@ const K_USERS = "cad:users";   // email -> { role: "admin"|"user", warehouses: [
 const CONFIG_DEFAULT = { ourMargin: 5.31, perSku: {} }; // ourMargin in %, fixed across SKUs
 const SKU_DEFAULTS = { margin: 1.12, gst: 5, ws: 15 };  // retailer margin divisor, GST %, wholesale % off MRP
 
-// per-SKU pricing: retail rate, RD (our cost incl GST), cost ex-GST, wholesale rate
+// per-SKU pricing: retail rate, RD (our cost incl GST), cost ex-GST, wholesale rate,
+// and per-piece profit (ex-GST) on retail and wholesale sales
 const skuPricing = (mrp, cfg, ourMargin) => {
   const m = cfg.margin || SKU_DEFAULTS.margin;
+  const g = (cfg.gst ?? SKU_DEFAULTS.gst) / 100;
   const retail = mrp / m;
   const rd = retail / (1 + ourMargin / 100);
-  const cost = rd / (1 + (cfg.gst ?? SKU_DEFAULTS.gst) / 100);
+  const cost = rd / (1 + g);
   const ws = mrp * (1 - (cfg.ws ?? SKU_DEFAULTS.ws) / 100);
-  return { retail, rd, cost, ws };
+  const profitR = retail / (1 + g) - cost;   // retail sale profit per pc, ex-GST
+  const profitW = ws / (1 + g) - cost;       // wholesale sale profit per pc, ex-GST
+  return { retail, rd, cost, ws, profitR, profitW };
 };
 const mvKey = (wh, date) => `cad:mv:${wh}:${date}`;       // movements for a warehouse-day
 const openKey = (wh, date) => `cad:open:${wh}:${date}`;   // opening snapshot (carry)
@@ -825,6 +829,31 @@ export default function App() {
     return () => { alive = false; };
   }, [tab, wh, month, products, prodByCode]);
 
+  // ---- P&L data (day uses loaded moves; month aggregates saved days) ----
+  const [plMode, setPlMode] = useState("day");
+  const [plMonth, setPlMonth] = useState(todayStr().slice(0, 7));
+  const [plSums, setPlSums] = useState(null);   // month mode: code -> {out, whole}
+  useEffect(() => {
+    if (tab !== "pl" || plMode !== "month" || !products || !wh) return;
+    let alive = true;
+    (async () => {
+      setPlSums(null);
+      try {
+        const mvRows = await kvGetLike(`cad:mv:${wh}:${plMonth}-%`);
+        if (!alive) return;
+        const sums = {};
+        mvRows.forEach((r) => Object.entries(r.value || {}).forEach(([code, mv]) => {
+          const p = prodByCode[code];
+          if (!p || !mv) return;
+          if (!sums[code]) sums[code] = { out: 0, whole: 0 };
+          ["out", "whole"].forEach((k) => { const c = mv[k]; if (c) sums[code][k] += toPcs(c.c, c.b, c.p, p.pcsCase, p.pcsOuter); });
+        }));
+        setPlSums(sums);
+      } catch (e) { setDbError(e.message || String(e)); if (alive) setPlSums({}); }
+    })();
+    return () => { alive = false; };
+  }, [tab, plMode, plMonth, wh, products, prodByCode]);
+
   // ---- opening stock upload (admin) ----
   const [showUpload, setShowUpload] = useState(false);
   const applyOpening = async (asOn, openMap, newProds, updates, cfgUpdates) => {
@@ -884,13 +913,13 @@ export default function App() {
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(st), "Stock Take");
 
     // Configuration
-    const cf = [["Code", "Product", "MRP", "Box/Case", "Pcs/Box", "Pcs/Case", "Margin", "GST %", "Retails", "RD", "Cost ex-GST", "WS %", "WS Rate", "Cost/Case"]];
+    const cf = [["Code", "Product", "MRP", "Box/Case", "Pcs/Box", "Pcs/Case", "Margin", "GST %", "Retails", "RD", "Cost ex-GST", "WS %", "WS Rate", "Cost/Case", "Profit/Pc Retail", "Profit/Pc WS"]];
     ps.forEach((p) => {
       const cfg = config.perSku[p.code] || {};
       const pr = skuPricing(p.mrp, cfg, config.ourMargin);
       cf.push([p.code, p.desc, p.mrp, p.pcsOuter > 0 ? +(p.pcsCase / p.pcsOuter).toFixed(2) : "", p.pcsOuter, p.pcsCase,
         cfg.margin ?? SKU_DEFAULTS.margin, cfg.gst ?? SKU_DEFAULTS.gst, +pr.retail.toFixed(2), +pr.rd.toFixed(2), +pr.cost.toFixed(2),
-        cfg.ws ?? SKU_DEFAULTS.ws, +pr.ws.toFixed(2), +(pr.cost * p.pcsCase).toFixed(2)]);
+        cfg.ws ?? SKU_DEFAULTS.ws, +pr.ws.toFixed(2), +(pr.cost * p.pcsCase).toFixed(2), +pr.profitR.toFixed(2), +pr.profitW.toFixed(2)]);
     });
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cf), "Configuration");
 
@@ -1025,11 +1054,12 @@ export default function App() {
         <button className={tab === "stocktake" ? "tab on" : "tab"} onClick={() => setTab("stocktake")}>Stock Take</button>
         <button className={tab === "report" ? "tab on" : "tab"} onClick={() => setTab("report")}>Stock Report</button>
         <button className={tab === "monthly" ? "tab on" : "tab"} onClick={() => setTab("monthly")}>Monthly</button>
+        <button className={tab === "pl" ? "tab on" : "tab"} onClick={() => setTab("pl")}>P&L</button>
         <button className={tab === "config" ? "tab on" : "tab"} onClick={() => setTab("config")}>Configuration</button>
         {isAdmin && <button className={tab === "users" ? "tab on" : "tab"} onClick={() => setTab("users")}>Users</button>}
         <div className="spacer" />
         <button className="ghost2" style={{ marginRight: 8 }} onClick={exportAll} title="Download all tabs as one Excel file">⬇ Export</button>
-        {!["config", "stocktake", "users", "dashboard", "monthly"].includes(tab) && (
+        {!["config", "stocktake", "users", "dashboard", "monthly", "pl"].includes(tab) && (
           <div className="savebox">
             {savedAt && <span className="saved">✓ saved {savedAt.toLocaleTimeString()}</span>}
             {!savedAt && <span className="unsaved">unsaved changes</span>}
@@ -1193,6 +1223,124 @@ export default function App() {
                   <div className="ftot">
                     {MOVES.map((m) => <span key={m.key} style={{ color: m.color }}>{m.label}: <b>{tot(m.key)}</b> pcs</span>)}
                   </div>
+                </div>
+              </>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* ===== P&L statement ===== */}
+      {tab === "pl" && (
+        <div className="report">
+          <div className="toolbar" style={{ paddingBottom: 4 }}>
+            <div className="ptitle" style={{ margin: 0, fontSize: 13, color: "#2a2018", fontWeight: 700 }}>
+              P&L — {wh} · {plMode === "day" ? fmtDate(date) : plMonth}
+            </div>
+            <div className="spacer" />
+            <div className="movepick">
+              <button className={plMode === "day" ? "mp on" : "mp"} style={plMode === "day" ? { background: "#6b1f24", borderColor: "#6b1f24" } : { color: "#6b1f24", borderColor: "#6b1f24" }} onClick={() => setPlMode("day")}>Day</button>
+              <button className={plMode === "month" ? "mp on" : "mp"} style={plMode === "month" ? { background: "#6b1f24", borderColor: "#6b1f24" } : { color: "#6b1f24", borderColor: "#6b1f24" }} onClick={() => setPlMode("month")}>Month</button>
+            </div>
+            {plMode === "month" && (
+              <input type="month" value={plMonth} onChange={(e) => setPlMonth(e.target.value)}
+                style={{ padding: "7px 10px", borderRadius: 7, border: "1px solid #d2c2a8", background: "#fff", fontSize: 13 }} />
+            )}
+          </div>
+          {plMode === "month" && !plSums ? <div className="hint">Loading month…</div> : (() => {
+            // qty sold per product: day mode reads today's loaded movements; month mode uses aggregated sums
+            const qty = (p) => {
+              if (plMode === "day") {
+                const mv = moves[p.code] || {};
+                const t = (k) => { const c = mv[k]; return c ? toPcs(c.c, c.b, c.p, p.pcsCase, p.pcsOuter) : 0; };
+                return { r: t("out"), w: t("whole") };
+              }
+              const s = plSums[p.code] || {};
+              return { r: s.out || 0, w: s.whole || 0 };
+            };
+            const rowsP = (products || []).map((p) => {
+              const q = qty(p);
+              if (!q.r && !q.w) return null;
+              const pr = skuPricing(p.mrp, config.perSku[p.code] || {}, config.ourMargin);
+              return {
+                p, qR: q.r, qW: q.w, pr,
+                revR: q.r * (pr.retail), revW: q.w * (pr.ws),
+                profR: q.r * pr.profitR, profW: q.w * pr.profitW,
+              };
+            }).filter(Boolean).filter((r) => {
+              const ql = query.trim().toLowerCase();
+              return !ql || r.p.desc.toLowerCase().includes(ql) || r.p.code.toLowerCase().includes(ql);
+            });
+            const T = rowsP.reduce((a, r) => ({
+              qR: a.qR + r.qR, qW: a.qW + r.qW, revR: a.revR + r.revR, revW: a.revW + r.revW,
+              profR: a.profR + r.profR, profW: a.profW + r.profW,
+            }), { qR: 0, qW: 0, revR: 0, revW: 0, profR: 0, profW: 0 });
+            return (
+              <>
+                <div className="rcards">
+                  <div className="rcard"><div className="rl">Retail Sales (Stock Out)</div><div className="rv sm" style={{ fontSize: 18 }}>{inr(T.revR)}<span className="rsub"> · {T.qR} pcs</span></div></div>
+                  <div className="rcard"><div className="rl">Retail Profit</div><div className="rv" style={{ color: "#1b7f4d" }}>{inr(T.profR)}</div></div>
+                  <div className="rcard"><div className="rl">Wholesale Sales</div><div className="rv sm" style={{ fontSize: 18 }}>{inr(T.revW)}<span className="rsub"> · {T.qW} pcs</span></div></div>
+                  <div className="rcard"><div className="rl">Wholesale Profit</div><div className="rv" style={{ color: T.profW < 0 ? "#b3261e" : "#1b7f4d" }}>{inr(T.profW)}</div></div>
+                  <div className="rcard"><div className="rl">Total Profit</div><div className="rv" style={{ color: T.profR + T.profW < 0 ? "#b3261e" : "#1b7f4d" }}>{inr(T.profR + T.profW)}</div></div>
+                </div>
+                <div className="toolbar" style={{ paddingTop: 0 }}>
+                  <input className="search" placeholder="Search product or code…" value={query} onChange={(e) => setQuery(e.target.value)} />
+                </div>
+                <div className="hint" style={{ paddingTop: 0 }}>
+                  Profit/pc is ex-GST: retail = Retails − RD, wholesale = WS Rate − RD (both ÷ (1+GST)). Edit/Cancel and Retail Extra are not counted. Showing only items sold.
+                </div>
+                <div className="gridwrap">
+                  <table className="grid">
+                    <thead>
+                      <tr>
+                        <th className="stick code">Code</th>
+                        <th className="stick desc">Product</th>
+                        <th className="num">MRP</th>
+                        <th className="num" style={{ color: "#b3261e" }}>Retail Qty</th>
+                        <th className="num">Retail Rate</th>
+                        <th className="num">Profit/Pc</th>
+                        <th className="num closing">Retail Profit</th>
+                        <th className="num" style={{ color: "#8a5a00" }}>WS Qty</th>
+                        <th className="num">WS Rate</th>
+                        <th className="num">Profit/Pc</th>
+                        <th className="num closing">WS Profit</th>
+                        <th className="num">Total Profit</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rowsP.map((r) => (
+                        <tr key={r.p.code}>
+                          <td className="stick code mono">{r.p.code}</td>
+                          <td className="stick desc">{r.p.desc}</td>
+                          <td className="num dim">{r.p.mrp}</td>
+                          <td className="num">{r.qR || ""}</td>
+                          <td className="num dim">{r.qR ? r.pr.retail.toFixed(2) : ""}</td>
+                          <td className="num dim">{r.qR ? r.pr.profitR.toFixed(2) : ""}</td>
+                          <td className="num closing">{r.qR ? inr(r.profR) : ""}</td>
+                          <td className="num">{r.qW || ""}</td>
+                          <td className="num dim">{r.qW ? r.pr.ws.toFixed(2) : ""}</td>
+                          <td className="num dim">{r.qW ? r.pr.profitW.toFixed(2) : ""}</td>
+                          <td className="num closing">{r.qW ? inr(r.profW) : ""}</td>
+                          <td className="num"><b>{inr(r.profR + r.profW)}</b></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr className="trow">
+                        <td className="stick code">TOTAL</td>
+                        <td className="stick desc">{rowsP.length} items sold</td>
+                        <td></td>
+                        <td className="num">{T.qR}</td>
+                        <td></td><td></td>
+                        <td className="num">{inr(T.profR)}</td>
+                        <td className="num">{T.qW}</td>
+                        <td></td><td></td>
+                        <td className="num">{inr(T.profW)}</td>
+                        <td className="num">{inr(T.profR + T.profW)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
                 </div>
               </>
             );
@@ -1428,6 +1576,8 @@ export default function App() {
                   <th>WS %</th>
                   <th className="num">WS Rate</th>
                   <th className="num">Cost/Case</th>
+                  <th className="num closing">Profit/Pc<br /><span>Retail</span></th>
+                  <th className="num closing">Profit/Pc<br /><span>WS</span></th>
                   <th></th>
                 </tr>
               </thead>
@@ -1472,6 +1622,8 @@ export default function App() {
                         : <td className="num dim">{cfg.ws ?? SKU_DEFAULTS.ws}%</td>}
                       <td className="num">{pr.ws.toFixed(2)}</td>
                       <td className="num dim">{(pr.cost * p.pcsCase).toFixed(2)}</td>
+                      <td className={"num closing " + (pr.profitR < 0 ? "negtxt" : "oktxt")}>{pr.profitR.toFixed(2)}</td>
+                      <td className={"num closing " + (pr.profitW < 0 ? "negtxt" : "oktxt")}>{pr.profitW.toFixed(2)}</td>
                       <td className="inp">
                         <button className={editing ? "unct edon" : "unct"} onClick={() => (editing ? setEditRow(null) : startEdit(p))}>
                           {editing ? "✓ Done" : "✎ Edit"}
