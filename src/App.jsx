@@ -104,13 +104,16 @@ function DecCell({ value, onChange, suffix }) {
 
 // ---------- add product panel ----------
 function AddProductPanel({ products, onAdd, onClose }) {
-  const [f, setF] = useState({ code: "", desc: "", mrp: "", pcsOuter: "", pcsCase: "", oc: "", ob: "", op: "" });
+  const [f, setF] = useState({ code: "", desc: "", mrp: "", boxes: "", pcsOuter: "" });
   const [err, setErr] = useState("");
   const set = (k) => (e) => setF((p) => ({ ...p, [k]: e.target.value }));
   const codeTrim = f.code.trim();
   const dupCode = codeTrim && products.some((p) => p.code.toLowerCase() === codeTrim.toLowerCase());
   const descTrim = f.desc.trim();
   const dupDesc = descTrim && products.find((p) => p.desc.trim().toLowerCase() === descTrim.toLowerCase() && Number(p.mrp) === parseFloat(f.mrp));
+  const boxes = parseInt(f.boxes, 10) || 0;
+  const pcsOuter = parseInt(f.pcsOuter, 10) || 0;
+  const pcsCase = boxes * pcsOuter; // auto-calculated
 
   const submit = () => {
     setErr("");
@@ -119,15 +122,10 @@ function AddProductPanel({ products, onAdd, onClose }) {
     if (!descTrim) return setErr("Description is required.");
     const mrp = parseFloat(f.mrp);
     if (!(mrp > 0)) return setErr("MRP must be a number greater than 0.");
-    const pcsOuter = parseInt(f.pcsOuter, 10) || 0;
-    const pcsCase = parseInt(f.pcsCase, 10) || 0;
-    if (pcsCase <= 0) return setErr("Pcs/Case must be greater than 0.");
-    if (pcsOuter > pcsCase) return setErr("Pcs/Box cannot exceed Pcs/Case.");
+    if (boxes <= 0) return setErr("Box/Case must be at least 1.");
+    if (pcsOuter <= 0) return setErr("Pcs/Box must be at least 1.");
     if (dupDesc && !window.confirm(`A product with the same description and MRP already exists (code ${dupDesc.code}). Add anyway?`)) return;
-    onAdd({
-      code: codeTrim, desc: descTrim, mrp, pcsOuter, pcsCase,
-      openCase: parseInt(f.oc, 10) || 0, openBox: parseInt(f.ob, 10) || 0, openPcs: parseInt(f.op, 10) || 0,
-    });
+    onAdd({ code: codeTrim, desc: descTrim, mrp, pcsOuter, pcsCase, openCase: 0, openBox: 0, openPcs: 0 });
     onClose();
   };
 
@@ -137,11 +135,9 @@ function AddProductPanel({ products, onAdd, onClose }) {
         <label>Code<input value={f.code} onChange={set("code")} placeholder="e.g. FUSE60" className={dupCode ? "bad" : ""} /></label>
         <label className="wide">Description<input value={f.desc} onChange={set("desc")} placeholder="e.g. CADBURY FUSE 55G RS-60" /></label>
         <label>MRP ₹<input value={f.mrp} onChange={set("mrp")} inputMode="decimal" /></label>
-        <label>Pcs/Box<input value={f.pcsOuter} onChange={set("pcsOuter")} inputMode="numeric" /></label>
-        <label>Pcs/Case<input value={f.pcsCase} onChange={set("pcsCase")} inputMode="numeric" /></label>
-        <label>Open Case<input value={f.oc} onChange={set("oc")} inputMode="numeric" /></label>
-        <label>Open Box<input value={f.ob} onChange={set("ob")} inputMode="numeric" /></label>
-        <label>Open Pcs<input value={f.op} onChange={set("op")} inputMode="numeric" /></label>
+        <label>Box/Case<input value={f.boxes} onChange={set("boxes")} inputMode="numeric" placeholder="10" /></label>
+        <label>Pcs/Box<input value={f.pcsOuter} onChange={set("pcsOuter")} inputMode="numeric" placeholder="20" /></label>
+        <label>Pcs/Case<span className="apauto">{pcsCase > 0 ? pcsCase : "auto"}</span></label>
         <button className="save" onClick={submit}>Add Product</button>
         <button className="ghost2" onClick={onClose}>Cancel</button>
       </div>
@@ -220,12 +216,27 @@ export default function App() {
   };
 
   // ---- product master mutations (persist immediately) ----
-  const updateProduct = (code, field, val) => {
+  const updateProduct = (code, fields) => {
     setProducts((prev) => {
-      const next = prev.map((p) => (p.code === code ? { ...p, [field]: val } : p));
+      const next = prev.map((p) => (p.code === code ? { ...p, ...fields } : p));
       sSet(K_PRODUCTS, next);
       return next;
     });
+  };
+
+  // ---- row-level edit mode in config (prevents accidental edits) ----
+  const [editRow, setEditRow] = useState(null);          // product code being edited
+  const [editPack, setEditPack] = useState({ boxes: 0, pcsOuter: 0 });
+  const startEdit = (p) => {
+    setEditRow(p.code);
+    setEditPack({ boxes: p.pcsOuter > 0 ? Math.round(p.pcsCase / p.pcsOuter) : 0, pcsOuter: p.pcsOuter });
+  };
+  const changePack = (code, dim, val) => {
+    const np = { ...editPack, [dim]: Math.max(0, val) };
+    setEditPack(np);
+    if (np.boxes > 0 && np.pcsOuter > 0) {
+      updateProduct(code, { pcsOuter: np.pcsOuter, pcsCase: np.boxes * np.pcsOuter });
+    }
   };
   const addProduct = (np) => {
     setProducts((prev) => {
@@ -638,8 +649,8 @@ export default function App() {
           {showAdd && <AddProductPanel products={products} onAdd={addProduct} onClose={() => setShowAdd(false)} />}
 
           <div className="hint">
-            <b>MRP, Pcs/Box, Pcs/Case are editable</b> — they update the product master everywhere (entry grid, reports, history display).
-            Also editable: <b>Margin</b> (retailer, divisor on MRP), <b>GST %</b> and <b>WS %</b> (flat % off MRP for wholesalers).
+            Rows are read-only — click <b>✎ Edit</b> at the end of a row to change MRP, Box/Case, Pcs/Box, Margin, GST % or WS %.
+            <b> Pcs/Case is auto-calculated</b> (Box/Case × Pcs/Box) and updates the master everywhere.
             Retails = MRP ÷ Margin · RD = Retails ÷ (1 + our %) · Cost = RD ÷ (1 + GST) — used for stock value.
           </div>
 
@@ -650,9 +661,9 @@ export default function App() {
                   <th className="stick code">Code</th>
                   <th className="stick desc">Product</th>
                   <th className="num">MRP</th>
-                  <th className="num">Pcs/Box</th>
-                  <th className="num">Pcs/Case</th>
                   <th className="num">Box/Case</th>
+                  <th className="num">Pcs/Box</th>
+                  <th className="num">Pcs/Case<br /><span>auto</span></th>
                   <th>Margin</th>
                   <th>GST %</th>
                   <th className="num">Retails</th>
@@ -661,28 +672,51 @@ export default function App() {
                   <th>WS %</th>
                   <th className="num">WS Rate</th>
                   <th className="num">Cost/Case</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((p) => {
                   const cfg = config.perSku[p.code] || {};
                   const pr = skuPricing(p.mrp, cfg, config.ourMargin);
+                  const editing = editRow === p.code;
+                  const boxesShow = p.pcsOuter > 0 ? (p.pcsCase / p.pcsOuter).toFixed(1).replace(/\.0$/, "") : "–";
                   return (
-                    <tr key={p.code}>
+                    <tr key={p.code} className={editing ? "redit" : ""}>
                       <td className="stick code mono">{p.code}</td>
                       <td className="stick desc">{p.desc}</td>
-                      <td className="inp"><DecCell value={p.mrp} onChange={(v) => { if (v > 0) updateProduct(p.code, "mrp", v); }} /></td>
-                      <td className="inp"><NumCell value={p.pcsOuter} onChange={(v) => updateProduct(p.code, "pcsOuter", Math.max(0, v))} /></td>
-                      <td className="inp"><NumCell value={p.pcsCase} onChange={(v) => { if (v > 0) updateProduct(p.code, "pcsCase", v); }} /></td>
-                      <td className="num dim">{p.pcsOuter > 0 ? (p.pcsCase / p.pcsOuter).toFixed(1).replace(/\.0$/, "") : "–"}</td>
-                      <td className="inp"><DecCell value={cfg.margin ?? SKU_DEFAULTS.margin} onChange={(v) => setSkuCfg(p.code, "margin", v)} /></td>
-                      <td className="inp"><DecCell value={cfg.gst ?? SKU_DEFAULTS.gst} suffix="%" onChange={(v) => setSkuCfg(p.code, "gst", v)} /></td>
+                      {editing ? (
+                        <>
+                          <td className="inp"><DecCell value={p.mrp} onChange={(v) => { if (v > 0) updateProduct(p.code, { mrp: v }); }} /></td>
+                          <td className="inp"><NumCell value={editPack.boxes} onChange={(v) => changePack(p.code, "boxes", v)} /></td>
+                          <td className="inp"><NumCell value={editPack.pcsOuter} onChange={(v) => changePack(p.code, "pcsOuter", v)} /></td>
+                          <td className="num dim">{p.pcsCase}</td>
+                          <td className="inp"><DecCell value={cfg.margin ?? SKU_DEFAULTS.margin} onChange={(v) => setSkuCfg(p.code, "margin", v)} /></td>
+                          <td className="inp"><DecCell value={cfg.gst ?? SKU_DEFAULTS.gst} suffix="%" onChange={(v) => setSkuCfg(p.code, "gst", v)} /></td>
+                        </>
+                      ) : (
+                        <>
+                          <td className="num dim">{p.mrp}</td>
+                          <td className="num">{boxesShow}</td>
+                          <td className="num">{p.pcsOuter || "–"}</td>
+                          <td className="num">{p.pcsCase || "–"}</td>
+                          <td className="num dim">{(cfg.margin ?? SKU_DEFAULTS.margin).toFixed(2)}</td>
+                          <td className="num dim">{cfg.gst ?? SKU_DEFAULTS.gst}%</td>
+                        </>
+                      )}
                       <td className="num">{pr.retail.toFixed(2)}</td>
                       <td className="num">{pr.rd.toFixed(2)}</td>
                       <td className="num closing">{pr.cost.toFixed(2)}</td>
-                      <td className="inp"><DecCell value={cfg.ws ?? SKU_DEFAULTS.ws} suffix="%" onChange={(v) => setSkuCfg(p.code, "ws", v)} /></td>
+                      {editing
+                        ? <td className="inp"><DecCell value={cfg.ws ?? SKU_DEFAULTS.ws} suffix="%" onChange={(v) => setSkuCfg(p.code, "ws", v)} /></td>
+                        : <td className="num dim">{cfg.ws ?? SKU_DEFAULTS.ws}%</td>}
                       <td className="num">{pr.ws.toFixed(2)}</td>
                       <td className="num dim">{(pr.cost * p.pcsCase).toFixed(2)}</td>
+                      <td className="inp">
+                        <button className={editing ? "unct edon" : "unct"} onClick={() => (editing ? setEditRow(null) : startEdit(p))}>
+                          {editing ? "✓ Done" : "✎ Edit"}
+                        </button>
+                      </td>
                     </tr>
                   );
                 })}
@@ -815,6 +849,9 @@ const CSS = `
 .aprow input.bad { border-color:#b3261e; background:#fdecec; }
 .aprow .wide input { width:260px; }
 .ghost2 { background:transparent; border:1px solid #d2c2a8; color:#6b5a45; border-radius:6px; padding:8px 14px; cursor:pointer; font-size:12px; }
+.apauto { display:inline-block; padding:7px 9px; font-size:13px; font-weight:700; color:#1b6b40; background:#f0f7f0; border:1px dashed #9cc0a5; border-radius:6px; min-width:50px; text-align:center; }
+.redit td { background:#fdf9ee !important; }
+.unct.edon { background:#1b7f4d; border-color:#1b7f4d; color:#fff; font-weight:700; }
 .aperr { margin-top:8px; font-size:12px; color:#b3261e; font-weight:600; }
 .apwarn { margin-top:8px; font-size:12px; color:#8a5a00; font-weight:600; }
 .dwrap { display:inline-flex; align-items:center; gap:2px; }
