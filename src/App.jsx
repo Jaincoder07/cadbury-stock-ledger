@@ -66,9 +66,11 @@ const skuPricing = (mrp, cfg, ourMargin) => {
   const rd = retail / (1 + ourMargin / 100);
   const cost = rd / (1 + g);
   const ws = mrp * (1 - (cfg.ws ?? SKU_DEFAULTS.ws) / 100);
-  const profitR = retail / (1 + g) - cost;   // retail sale profit per pc, ex-GST
-  const profitW = ws / (1 + g) - cost;       // wholesale sale profit per pc, ex-GST
-  return { retail, rd, cost, ws, profitR, profitW };
+  const retailNet = retail / (1 + g);        // retail sale value per pc, ex-GST
+  const wsNet = ws / (1 + g);                // wholesale sale value per pc, ex-GST
+  const profitR = retailNet - cost;          // retail sale profit per pc, ex-GST
+  const profitW = wsNet - cost;              // wholesale sale profit per pc, ex-GST
+  return { retail, rd, cost, ws, retailNet, wsNet, profitR, profitW };
 };
 const mvKey = (wh, date) => `cad:mv:${wh}:${date}`;       // movements for a warehouse-day
 const openKey = (wh, date) => `cad:open:${wh}:${date}`;   // opening snapshot (carry)
@@ -497,6 +499,8 @@ export default function App() {
     saveConfig(next);
   };
   const [showAdd, setShowAdd] = useState(false);
+  const [cfgMrp, setCfgMrp] = useState("");        // config tab: filter by MRP ("" = all)
+  const [cfgFilter, setCfgFilter] = useState("all"); // all | custom | wsloss
 
   // ---- physical stock take (per warehouse-day, auto-saved) ----
   const [counts, setCounts] = useState({});          // code -> {c,b,p}; row present = counted (loaded in loadDay)
@@ -1149,18 +1153,21 @@ export default function App() {
               Monthly Movement — {wh}
             </div>
             <div className="spacer" />
+            <input className="search" style={{ flex: "0 1 260px" }} placeholder="Search product or code…" value={query} onChange={(e) => setQuery(e.target.value)} />
             <input type="month" value={month} onChange={(e) => setMonth(e.target.value)}
               style={{ padding: "7px 10px", borderRadius: 7, border: "1px solid #d2c2a8", background: "#fff", fontSize: 13 }} />
           </div>
           {!monthly ? <div className="hint">Loading month…</div> : (() => {
             const ps = products || [];
+            const ql = query.trim().toLowerCase();
             const rowsM = ps.map((p) => {
               const o = monthly.baseOpen[p.code] || 0;
               const s = monthly.sums[p.code] || {};
               let net = 0;
               MOVES.forEach((m) => { net += m.sign * (s[m.key] || 0); });
               return { p, o, s, net, cl: o + net };
-            }).filter((r) => r.o !== 0 || r.net !== 0);
+            }).filter((r) => r.o !== 0 || r.net !== 0)
+              .filter((r) => !ql || r.p.desc.toLowerCase().includes(ql) || r.p.code.toLowerCase().includes(ql));
             const tot = (f) => rowsM.reduce((a, r) => a + (r.s[f] || 0), 0);
             return (
               <>
@@ -1264,7 +1271,8 @@ export default function App() {
               const pr = skuPricing(p.mrp, config.perSku[p.code] || {}, config.ourMargin);
               return {
                 p, qR: q.r, qW: q.w, pr,
-                revR: q.r * (pr.retail), revW: q.w * (pr.ws),
+                revR: q.r * pr.retailNet, revW: q.w * pr.wsNet,
+                costR: q.r * pr.cost, costW: q.w * pr.cost,
                 profR: q.r * pr.profitR, profW: q.w * pr.profitW,
               };
             }).filter(Boolean).filter((r) => {
@@ -1273,22 +1281,26 @@ export default function App() {
             });
             const T = rowsP.reduce((a, r) => ({
               qR: a.qR + r.qR, qW: a.qW + r.qW, revR: a.revR + r.revR, revW: a.revW + r.revW,
+              costR: a.costR + r.costR, costW: a.costW + r.costW,
               profR: a.profR + r.profR, profW: a.profW + r.profW,
-            }), { qR: 0, qW: 0, revR: 0, revW: 0, profR: 0, profW: 0 });
+            }), { qR: 0, qW: 0, revR: 0, revW: 0, costR: 0, costW: 0, profR: 0, profW: 0 });
             return (
               <>
                 <div className="rcards">
-                  <div className="rcard"><div className="rl">Retail Sales (Stock Out)</div><div className="rv sm" style={{ fontSize: 18 }}>{inr(T.revR)}<span className="rsub"> · {T.qR} pcs</span></div></div>
-                  <div className="rcard"><div className="rl">Retail Profit</div><div className="rv" style={{ color: "#1b7f4d" }}>{inr(T.profR)}</div></div>
-                  <div className="rcard"><div className="rl">Wholesale Sales</div><div className="rv sm" style={{ fontSize: 18 }}>{inr(T.revW)}<span className="rsub"> · {T.qW} pcs</span></div></div>
-                  <div className="rcard"><div className="rl">Wholesale Profit</div><div className="rv" style={{ color: T.profW < 0 ? "#b3261e" : "#1b7f4d" }}>{inr(T.profW)}</div></div>
+                  <div className="rcard"><div className="rl">Retail Sales (Stock Out)</div><div className="rv sm" style={{ fontSize: 17 }}>{inr(T.revR)}<span className="rsub"> · {T.qR} pcs</span></div></div>
+                  <div className="rcard"><div className="rl">Retail Cost</div><div className="rv sm" style={{ fontSize: 17 }}>{inr(T.costR)}</div></div>
+                  <div className="rcard"><div className="rl">Retail Profit</div><div className="rv sm" style={{ fontSize: 17, color: "#1b7f4d" }}>{inr(T.profR)}</div></div>
+                  <div className="rcard"><div className="rl">Wholesale Sales</div><div className="rv sm" style={{ fontSize: 17 }}>{inr(T.revW)}<span className="rsub"> · {T.qW} pcs</span></div></div>
+                  <div className="rcard"><div className="rl">Wholesale Cost</div><div className="rv sm" style={{ fontSize: 17 }}>{inr(T.costW)}</div></div>
+                  <div className="rcard"><div className="rl">Wholesale Profit</div><div className="rv sm" style={{ fontSize: 17, color: T.profW < 0 ? "#b3261e" : "#1b7f4d" }}>{inr(T.profW)}</div></div>
                   <div className="rcard"><div className="rl">Total Profit</div><div className="rv" style={{ color: T.profR + T.profW < 0 ? "#b3261e" : "#1b7f4d" }}>{inr(T.profR + T.profW)}</div></div>
                 </div>
                 <div className="toolbar" style={{ paddingTop: 0 }}>
                   <input className="search" placeholder="Search product or code…" value={query} onChange={(e) => setQuery(e.target.value)} />
                 </div>
                 <div className="hint" style={{ paddingTop: 0 }}>
-                  Profit/pc is ex-GST: retail = Retails − RD, wholesale = WS Rate − RD (both ÷ (1+GST)). Edit/Cancel and Retail Extra are not counted. Showing only items sold.
+                  Sales Value, Cost Value and Profit are all <b>ex-GST</b> (Sales − Cost = Profit exactly). Rate columns show the billing rate incl GST.
+                  Edit/Cancel and Retail Extra are not counted. Showing only items sold.
                 </div>
                 <div className="gridwrap">
                   <table className="grid">
@@ -1298,11 +1310,15 @@ export default function App() {
                         <th className="stick desc">Product</th>
                         <th className="num">MRP</th>
                         <th className="num" style={{ color: "#b3261e" }}>Retail Qty</th>
-                        <th className="num">Retail Rate</th>
+                        <th className="num">Rate</th>
+                        <th className="num">Sales Value</th>
+                        <th className="num">Cost Value</th>
                         <th className="num">Profit/Pc</th>
                         <th className="num closing">Retail Profit</th>
                         <th className="num" style={{ color: "#8a5a00" }}>WS Qty</th>
-                        <th className="num">WS Rate</th>
+                        <th className="num">Rate</th>
+                        <th className="num">Sales Value</th>
+                        <th className="num">Cost Value</th>
                         <th className="num">Profit/Pc</th>
                         <th className="num closing">WS Profit</th>
                         <th className="num">Total Profit</th>
@@ -1316,10 +1332,14 @@ export default function App() {
                           <td className="num dim">{r.p.mrp}</td>
                           <td className="num">{r.qR || ""}</td>
                           <td className="num dim">{r.qR ? r.pr.retail.toFixed(2) : ""}</td>
+                          <td className="num">{r.qR ? inr(r.revR) : ""}</td>
+                          <td className="num dim">{r.qR ? inr(r.costR) : ""}</td>
                           <td className="num dim">{r.qR ? r.pr.profitR.toFixed(2) : ""}</td>
                           <td className="num closing">{r.qR ? inr(r.profR) : ""}</td>
                           <td className="num">{r.qW || ""}</td>
                           <td className="num dim">{r.qW ? r.pr.ws.toFixed(2) : ""}</td>
+                          <td className="num">{r.qW ? inr(r.revW) : ""}</td>
+                          <td className="num dim">{r.qW ? inr(r.costW) : ""}</td>
                           <td className="num dim">{r.qW ? r.pr.profitW.toFixed(2) : ""}</td>
                           <td className="num closing">{r.qW ? inr(r.profW) : ""}</td>
                           <td className="num"><b>{inr(r.profR + r.profW)}</b></td>
@@ -1332,10 +1352,16 @@ export default function App() {
                         <td className="stick desc">{rowsP.length} items sold</td>
                         <td></td>
                         <td className="num">{T.qR}</td>
-                        <td></td><td></td>
+                        <td></td>
+                        <td className="num">{inr(T.revR)}</td>
+                        <td className="num">{inr(T.costR)}</td>
+                        <td></td>
                         <td className="num">{inr(T.profR)}</td>
                         <td className="num">{T.qW}</td>
-                        <td></td><td></td>
+                        <td></td>
+                        <td className="num">{inr(T.revW)}</td>
+                        <td className="num">{inr(T.costW)}</td>
+                        <td></td>
                         <td className="num">{inr(T.profW)}</td>
                         <td className="num">{inr(T.profR + T.profW)}</td>
                       </tr>
@@ -1538,6 +1564,17 @@ export default function App() {
                 ? <DecCell value={config.ourMargin} suffix="%" onChange={(v) => saveConfig({ ...config, ourMargin: v })} />
                 : <b>{config.ourMargin}%</b>}
             </label>
+            <select value={cfgMrp} onChange={(e) => setCfgMrp(e.target.value)}
+              style={{ padding: "8px 10px", borderRadius: 7, border: "1px solid #d2c2a8", background: "#fff", fontSize: 13 }}>
+              <option value="">All MRPs</option>
+              {[...new Set((products || []).map((p) => p.mrp))].sort((a, b) => a - b).map((m) => <option key={m} value={m}>₹{m}</option>)}
+            </select>
+            <select value={cfgFilter} onChange={(e) => setCfgFilter(e.target.value)}
+              style={{ padding: "8px 10px", borderRadius: 7, border: "1px solid #d2c2a8", background: "#fff", fontSize: 13 }}>
+              <option value="all">All products</option>
+              <option value="custom">Custom margins only</option>
+              <option value="wsloss">WS loss-making</option>
+            </select>
             <button className="save" onClick={() => setShowAdd(!showAdd)}>{showAdd ? "✕ Close" : "＋ Add Product"}</button>
             {isAdmin && (
               <button className="ghost2" onClick={() => setShowUpload(!showUpload)}>
@@ -1582,7 +1619,15 @@ export default function App() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((p) => {
+                {rows.filter((p) => {
+                  if (cfgMrp && p.mrp !== +cfgMrp) return false;
+                  if (cfgFilter === "custom") {
+                    const c = config.perSku[p.code];
+                    if (!c || (c.margin == null && c.ws == null && c.gst == null)) return false;
+                  }
+                  if (cfgFilter === "wsloss" && skuPricing(p.mrp, config.perSku[p.code] || {}, config.ourMargin).profitW >= 0) return false;
+                  return true;
+                }).map((p) => {
                   const cfg = config.perSku[p.code] || {};
                   const pr = skuPricing(p.mrp, cfg, config.ourMargin);
                   const editing = editRow === p.code;
@@ -1646,6 +1691,13 @@ export default function App() {
       {/* ===== report ===== */}
       {tab === "report" && (
         <div className="report">
+          <div className="toolbar" style={{ paddingBottom: 4 }}>
+            <input className="search" placeholder="Search product or code…" value={query} onChange={(e) => setQuery(e.target.value)} />
+            <label className="zt">
+              <input type="checkbox" checked={showZero} onChange={(e) => setShowZero(e.target.checked)} />
+              show all
+            </label>
+          </div>
           <div className="rcards">
             <div className="rcard"><div className="rl">Opening Value</div><div className="rv">{inr(totals.openVal)}</div></div>
             <div className="rcard"><div className="rl">Closing Value</div><div className="rv">{inr(totals.closeVal)}</div></div>
