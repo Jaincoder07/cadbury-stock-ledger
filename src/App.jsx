@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
-import { kvGetMany, kvSet, kvSetBg, migrateLocalStorage, onStorageError } from "./storage";
+import { supabase, kvGetMany, kvSet, kvSetBg, migrateLocalStorage, onStorageError } from "./storage";
 
 // Seed products from client's actual Cadbury stock sheet:
 // [code, desc, mrp, pcsOuter (Box=outer), pcsCase, openCase, openBox, openPcs]
@@ -53,6 +53,7 @@ const fromPcs = (total, pcsCase, pcsOuter) => {
 const K_PRODUCTS = "cad:products";
 const K_WAREHOUSES = "cad:warehouses";
 const K_CONFIG = "cad:config";
+const K_USERS = "cad:users";   // email -> { role: "admin"|"user", warehouses: [names] }
 
 // pricing defaults (editable in the Configuration tab)
 const CONFIG_DEFAULT = { ourMargin: 5.31, perSku: {} }; // ourMargin in %, fixed across SKUs
@@ -97,6 +98,138 @@ function DecCell({ value, onChange, suffix }) {
       />
       {suffix && <span className="dsuf">{suffix}</span>}
     </span>
+  );
+}
+
+// ---------- login screen ----------
+function Login() {
+  const [email, setEmail] = useState("");
+  const [pw, setPw] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const go = async (e) => {
+    e.preventDefault();
+    setBusy(true); setErr("");
+    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: pw });
+    if (error) setErr(error.message === "Invalid login credentials" ? "Wrong email or password." : error.message);
+    setBusy(false);
+  };
+  return (
+    <div className="wrap" style={{ display: "grid", placeItems: "center", minHeight: "100vh" }}>
+      <style>{CSS}</style>
+      <form className="loginbox" onSubmit={go}>
+        <div className="logo" style={{ margin: "0 auto 10px" }}>CAD</div>
+        <div className="title" style={{ textAlign: "center", color: "#2a2018" }}>STOCK LEDGER</div>
+        <div className="sub" style={{ textAlign: "center", color: "#6b5a45", marginBottom: 18 }}>Sign in to continue</div>
+        <label>Email<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoFocus /></label>
+        <label>Password<input type="password" value={pw} onChange={(e) => setPw(e.target.value)} /></label>
+        {err && <div className="aperr">{err}</div>}
+        <button className="save" type="submit" disabled={busy || !email || !pw} style={{ width: "100%", marginTop: 14, padding: "11px" }}>
+          {busy ? "Signing in…" : "Sign In"}
+        </button>
+        <div className="sub" style={{ textAlign: "center", color: "#9a8a72", marginTop: 14 }}>
+          No account? Ask your administrator.
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// ---------- text cell (code / name editing) ----------
+function TextCell({ value, onCommit, width }) {
+  const [v, setV] = useState(value ?? "");
+  useEffect(() => { setV(value ?? ""); }, [value]);
+  return (
+    <input
+      className="ncell tcell"
+      style={width ? { width } : undefined}
+      value={v}
+      onChange={(e) => setV(e.target.value)}
+      onBlur={() => { if (v.trim() !== (value ?? "")) onCommit(v.trim()); }}
+      onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+    />
+  );
+}
+
+// ---------- users panel (admin) ----------
+function UsersPanel({ usersMap, saveUsers, warehouses, myEmail }) {
+  const [newEmail, setNewEmail] = useState("");
+  const emails = Object.keys(usersMap).sort();
+  const setUser = (em, patch) => saveUsers({ ...usersMap, [em]: { ...usersMap[em], ...patch } });
+  const toggleWh = (em, w) => {
+    const cur = usersMap[em].warehouses || [];
+    setUser(em, { warehouses: cur.includes(w) ? cur.filter((x) => x !== w) : [...cur, w] });
+  };
+  const addUser = () => {
+    const em = newEmail.trim().toLowerCase();
+    if (!em || !em.includes("@")) return;
+    if (usersMap[em]) { alert("Already in the list."); return; }
+    saveUsers({ ...usersMap, [em]: { role: "user", warehouses: [] } });
+    setNewEmail("");
+  };
+  const removeUser = (em) => {
+    if (em === myEmail) return;
+    if (!window.confirm(`Remove access for ${em}?`)) return;
+    const next = { ...usersMap };
+    delete next[em];
+    saveUsers(next);
+  };
+  return (
+    <div className="report">
+      <div className="hint" style={{ paddingTop: 10 }}>
+        Two steps to give someone access: <b>1.</b> create their login in Supabase → Authentication → Users → Add user
+        (email + password, auto-confirm on). <b>2.</b> add the same email here and allot warehouses.
+        Warehouse users can enter stock, stock-take, see reports, add products, and edit product code/name only.
+      </div>
+      <div className="addpanel" style={{ margin: "10px 18px" }}>
+        <div className="aprow">
+          <label className="wide">Add user by email<input value={newEmail} onChange={(e) => setNewEmail(e.target.value)} placeholder="staff@example.com" /></label>
+          <button className="save" onClick={addUser}>Add</button>
+        </div>
+      </div>
+      <div className="gridwrap" style={{ maxHeight: "none" }}>
+        <table className="grid">
+          <thead>
+            <tr>
+              <th style={{ textAlign: "left" }}>Email</th>
+              <th>Role</th>
+              <th style={{ textAlign: "left" }}>Allotted Warehouses</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {emails.map((em) => {
+              const u = usersMap[em];
+              const self = em === myEmail;
+              return (
+                <tr key={em}>
+                  <td className="mono" style={{ fontSize: 12 }}>{em}{self && <span className="dim"> (you)</span>}</td>
+                  <td className="inp">
+                    <select value={u.role} disabled={self} onChange={(e) => setUser(em, { role: e.target.value })}
+                      style={{ padding: "5px 8px", borderRadius: 6, border: "1px solid #d2c2a8", background: "#fffdf8" }}>
+                      <option value="user">user</option>
+                      <option value="admin">admin</option>
+                    </select>
+                  </td>
+                  <td>
+                    {u.role === "admin" ? <span className="dim">all warehouses</span> :
+                      warehouses.map((w) => (
+                        <label key={w} className="zt" style={{ display: "inline-flex", marginRight: 14 }}>
+                          <input type="checkbox" checked={(u.warehouses || []).includes(w)} onChange={() => toggleWh(em, w)} />
+                          {w}
+                        </label>
+                      ))}
+                  </td>
+                  <td className="inp">
+                    {!self && <button className="unct" onClick={() => removeUser(em)}>✕ Remove</button>}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
@@ -221,6 +354,36 @@ export default function App() {
     });
   };
 
+  // rename a product's code: master + per-SKU config + today's loaded data follow the new code.
+  // (history saved under the old code on previous days stays there — rename soon after creating.)
+  const renameProductCode = (oldCode, newCode) => {
+    if (!newCode || newCode === oldCode) return;
+    if (products.some((p) => p.code.toLowerCase() === newCode.toLowerCase() && p.code !== oldCode)) {
+      alert(`Code "${newCode}" already exists.`);
+      return;
+    }
+    setProducts((prev) => {
+      const next = prev.map((p) => (p.code === oldCode ? { ...p, code: newCode } : p));
+      kvSetBg(K_PRODUCTS, next);
+      return next;
+    });
+    if (config.perSku[oldCode]) {
+      const perSku = { ...config.perSku, [newCode]: config.perSku[oldCode] };
+      delete perSku[oldCode];
+      saveConfig({ ...config, perSku });
+    }
+    const moveKeyed = (obj) => {
+      if (!(oldCode in obj)) return obj;
+      const next = { ...obj, [newCode]: obj[oldCode] };
+      delete next[oldCode];
+      return next;
+    };
+    setOpening((o) => moveKeyed(o));
+    setMoves((mv) => { const n = moveKeyed(mv); if (n !== mv) setSavedAt(null); return n; });
+    setCounts((c) => { const n = moveKeyed(c); if (n !== c) kvSetBg(countKey(wh, date), n); return n; });
+    setEditRow(newCode);
+  };
+
   // ---- row-level edit mode in config (prevents accidental edits) ----
   const [editRow, setEditRow] = useState(null);          // product code being edited
   const [editPack, setEditPack] = useState({ boxes: 0, pcsOuter: 0 });
@@ -249,15 +412,30 @@ export default function App() {
   const [dbError, setDbError] = useState(null);
   useEffect(() => { onStorageError((msg) => setDbError(msg)); }, []);
 
-  // ---- load products + warehouses + config from Supabase once ----
+  // ---- auth session ----
+  const [session, setSession] = useState(undefined);   // undefined = still checking
+  const [usersMap, setUsersMap] = useState({});         // email -> {role, warehouses}
+  const [profile, setProfile] = useState(null);         // current user's entry
   useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
+    return () => sub.subscription.unsubscribe();
+  }, []);
+  const myEmail = session?.user?.email?.toLowerCase() || null;
+  const isAdmin = profile?.role === "admin";
+  const signOut = () => supabase.auth.signOut();
+
+  // ---- load products + warehouses + config + users after login ----
+  useEffect(() => {
+    if (!session) return;
     (async () => {
+      setLoading(true);
       try {
-        let m = await kvGetMany([K_PRODUCTS, K_WAREHOUSES, K_CONFIG]);
+        let m = await kvGetMany([K_PRODUCTS, K_WAREHOUSES, K_CONFIG, K_USERS]);
         // first run from a browser that has old localStorage data → migrate it up
         if (!m[K_PRODUCTS] && localHasOldData()) {
           await migrateLocalStorage();
-          m = await kvGetMany([K_PRODUCTS, K_WAREHOUSES, K_CONFIG]);
+          m = await kvGetMany([K_PRODUCTS, K_WAREHOUSES, K_CONFIG, K_USERS]);
         }
         let p = m[K_PRODUCTS];
         if (!p) {
@@ -272,16 +450,33 @@ export default function App() {
         let w = m[K_WAREHOUSES];
         if (!w) { w = WAREHOUSES_DEFAULT; kvSetBg(K_WAREHOUSES, w); }
         setWarehouses(w);
-        setWh(w[0]);
         const cfg = m[K_CONFIG];
         if (cfg) setConfig({ ...CONFIG_DEFAULT, ...cfg, perSku: cfg.perSku || {} });
+        // users: first ever login becomes admin
+        let u = m[K_USERS];
+        const em = session.user.email.toLowerCase();
+        if (!u) { u = { [em]: { role: "admin", warehouses: [] } }; await kvSet(K_USERS, u); }
+        setUsersMap(u);
+        const prof = u[em] || null;
+        setProfile(prof);
+        // initial warehouse = first one this user may access
+        const allowed = prof?.role === "admin" ? w : w.filter((x) => (prof?.warehouses || []).includes(x));
+        setWh(allowed[0] || "");
         setDbError(null);
       } catch (e) {
         setDbError(e.message || String(e));
       }
       setLoading(false);
     })();
-  }, []);
+  }, [session]);
+
+  // warehouses this user can see
+  const allowedWh = useMemo(() => {
+    if (!profile) return [];
+    return isAdmin ? warehouses : warehouses.filter((w) => (profile.warehouses || []).includes(w));
+  }, [profile, isAdmin, warehouses]);
+
+  const saveUsers = (next) => { setUsersMap(next); kvSetBg(K_USERS, next); };
 
   // ---- load a warehouse-day (opening + movements + physical counts) ----
   const loadDay = useCallback(async (whName, d, prods) => {
@@ -439,8 +634,34 @@ export default function App() {
     setWarehouses(w); kvSetBg(K_WAREHOUSES, w); setWh(name);
   };
 
+  if (session === undefined) return (
+    <div style={{ padding: 40, fontFamily: "monospace", color: "#5b4a3a" }}>Checking session…</div>
+  );
+  if (!session) return <Login />;
   if (loading) return (
     <div style={{ padding: 40, fontFamily: "monospace", color: "#5b4a3a" }}>Loading stock data from cloud…</div>
+  );
+  if (!profile) return (
+    <div className="wrap" style={{ display: "grid", placeItems: "center", minHeight: "100vh" }}>
+      <style>{CSS}</style>
+      <div className="loginbox" style={{ textAlign: "center" }}>
+        <div className="title" style={{ color: "#2a2018" }}>No access</div>
+        <p style={{ fontSize: 13, color: "#6b5a45" }}>
+          Your account <b>{myEmail}</b> has no permissions yet.<br />Ask the administrator to add you in the Users tab.
+        </p>
+        <button className="save" onClick={signOut}>Sign Out</button>
+      </div>
+    </div>
+  );
+  if (!isAdmin && allowedWh.length === 0) return (
+    <div className="wrap" style={{ display: "grid", placeItems: "center", minHeight: "100vh" }}>
+      <style>{CSS}</style>
+      <div className="loginbox" style={{ textAlign: "center" }}>
+        <div className="title" style={{ color: "#2a2018" }}>No warehouse assigned</div>
+        <p style={{ fontSize: 13, color: "#6b5a45" }}>Ask the administrator to allot you a warehouse.</p>
+        <button className="save" onClick={signOut}>Sign Out</button>
+      </div>
+    </div>
   );
 
   const activeMv = MOVES.find((m) => m.key === activeMove);
@@ -469,10 +690,10 @@ export default function App() {
           <label className="ctl">
             <span>Warehouse</span>
             <select value={wh} onChange={(e) => setWh(e.target.value)}>
-              {warehouses.map((w) => <option key={w}>{w}</option>)}
+              {allowedWh.map((w) => <option key={w}>{w}</option>)}
             </select>
           </label>
-          <button className="ghost" onClick={addWarehouse} title="Add warehouse">＋</button>
+          {isAdmin && <button className="ghost" onClick={addWarehouse} title="Add warehouse">＋</button>}
           <label className="ctl">
             <span>Date</span>
             <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
@@ -480,6 +701,10 @@ export default function App() {
           <button className="ghost" onClick={() => setDate(addDays(date, -1))}>‹ Prev</button>
           <button className="ghost" onClick={() => setDate(addDays(date, +1))}>Next ›</button>
           <button className="ghost" onClick={() => setDate(todayStr())}>Today</button>
+          <label className="ctl" title={myEmail}>
+            <span>{isAdmin ? "Admin" : "User"}</span>
+            <button className="ghost" onClick={signOut}>{myEmail.split("@")[0]} · Sign Out</button>
+          </label>
         </div>
       </div>
 
@@ -489,8 +714,9 @@ export default function App() {
         <button className={tab === "stocktake" ? "tab on" : "tab"} onClick={() => setTab("stocktake")}>Stock Take</button>
         <button className={tab === "report" ? "tab on" : "tab"} onClick={() => setTab("report")}>Stock Report</button>
         <button className={tab === "config" ? "tab on" : "tab"} onClick={() => setTab("config")}>Configuration</button>
+        {isAdmin && <button className={tab === "users" ? "tab on" : "tab"} onClick={() => setTab("users")}>Users</button>}
         <div className="spacer" />
-        {tab !== "config" && tab !== "stocktake" && (
+        {!["config", "stocktake", "users"].includes(tab) && (
           <div className="savebox">
             {savedAt && <span className="saved">✓ saved {savedAt.toLocaleTimeString()}</span>}
             {!savedAt && <span className="unsaved">unsaved changes</span>}
@@ -672,6 +898,11 @@ export default function App() {
         </>
       )}
 
+      {/* ===== users (admin) ===== */}
+      {tab === "users" && isAdmin && (
+        <UsersPanel usersMap={usersMap} saveUsers={saveUsers} warehouses={warehouses} myEmail={myEmail} />
+      )}
+
       {/* ===== configuration ===== */}
       {tab === "config" && (
         <>
@@ -679,7 +910,9 @@ export default function App() {
             <input className="search" placeholder="Search product or code…" value={query} onChange={(e) => setQuery(e.target.value)} />
             <label className="zt" title="Our fixed wholesaler margin, applied on the retail rate. RD = Retail ÷ (1 + this)">
               Our margin&nbsp;
-              <DecCell value={config.ourMargin} suffix="%" onChange={(v) => saveConfig({ ...config, ourMargin: v })} />
+              {isAdmin
+                ? <DecCell value={config.ourMargin} suffix="%" onChange={(v) => saveConfig({ ...config, ourMargin: v })} />
+                : <b>{config.ourMargin}%</b>}
             </label>
             <button className="save" onClick={() => setShowAdd(!showAdd)}>{showAdd ? "✕ Close" : "＋ Add Product"}</button>
           </div>
@@ -687,9 +920,10 @@ export default function App() {
           {showAdd && <AddProductPanel products={products} onAdd={addProduct} onClose={() => setShowAdd(false)} />}
 
           <div className="hint">
-            Rows are read-only — click <b>✎ Edit</b> at the end of a row to change MRP, Box/Case, Pcs/Box, Margin, GST % or WS %.
-            <b> Pcs/Case is auto-calculated</b> (Box/Case × Pcs/Box) and updates the master everywhere.
-            Retails = MRP ÷ Margin · RD = Retails ÷ (1 + our %) · Cost = RD ÷ (1 + GST) — used for stock value.
+            Rows are read-only — click <b>✎ Edit</b> at the end of a row to change
+            {isAdmin ? <> code, name, MRP, Box/Case, Pcs/Box, Margin, GST % or WS %. <b>Pcs/Case is auto-calculated</b> (Box/Case × Pcs/Box).</>
+              : <> the product <b>code and name</b> (other fields are admin-only).</>}
+            {" "}Retails = MRP ÷ Margin · RD = Retails ÷ (1 + our %) · Cost = RD ÷ (1 + GST) — used for stock value.
           </div>
 
           <div className="gridwrap">
@@ -721,9 +955,13 @@ export default function App() {
                   const boxesShow = p.pcsOuter > 0 ? (p.pcsCase / p.pcsOuter).toFixed(1).replace(/\.0$/, "") : "–";
                   return (
                     <tr key={p.code} className={editing ? "redit" : ""}>
-                      <td className="stick code mono">{p.code}</td>
-                      <td className="stick desc">{p.desc}</td>
-                      {editing ? (
+                      <td className="stick code mono">
+                        {editing ? <TextCell value={p.code} width={70} onCommit={(v) => renameProductCode(p.code, v)} /> : p.code}
+                      </td>
+                      <td className="stick desc">
+                        {editing ? <TextCell value={p.desc} width={210} onCommit={(v) => { if (v) updateProduct(p.code, { desc: v }); }} /> : p.desc}
+                      </td>
+                      {editing && isAdmin ? (
                         <>
                           <td className="inp"><DecCell value={p.mrp} onChange={(v) => { if (v > 0) updateProduct(p.code, { mrp: v }); }} /></td>
                           <td className="inp"><NumCell value={editPack.boxes} onChange={(v) => changePack(p.code, "boxes", v)} /></td>
@@ -745,7 +983,7 @@ export default function App() {
                       <td className="num">{pr.retail.toFixed(2)}</td>
                       <td className="num">{pr.rd.toFixed(2)}</td>
                       <td className="num closing">{pr.cost.toFixed(2)}</td>
-                      {editing
+                      {editing && isAdmin
                         ? <td className="inp"><DecCell value={cfg.ws ?? SKU_DEFAULTS.ws} suffix="%" onChange={(v) => setSkuCfg(p.code, "ws", v)} /></td>
                         : <td className="num dim">{cfg.ws ?? SKU_DEFAULTS.ws}%</td>}
                       <td className="num">{pr.ws.toFixed(2)}</td>
@@ -905,6 +1143,11 @@ const CSS = `
 .unct.edon { background:#1b7f4d; border-color:#1b7f4d; color:#fff; font-weight:700; }
 .aperr { margin-top:8px; font-size:12px; color:#b3261e; font-weight:600; }
 .apwarn { margin-top:8px; font-size:12px; color:#8a5a00; font-weight:600; }
+.loginbox { background:#fff; border:1px solid #d2c2a8; border-radius:12px; padding:30px 34px; width:340px; box-shadow:0 4px 24px rgba(42,32,24,.08); }
+.loginbox label { display:flex; flex-direction:column; gap:4px; font-size:10px; text-transform:uppercase; letter-spacing:.8px; color:#6b5a45; font-weight:700; margin-top:12px; }
+.loginbox input { border:1px solid #d2c2a8; border-radius:7px; padding:10px 12px; font-size:14px; background:#fffdf8; }
+.loginbox input:focus { outline:none; border-color:#6b1f24; box-shadow:0 0 0 2px rgba(107,31,36,.12); }
+.tcell { text-align:left; }
 .dwrap { display:inline-flex; align-items:center; gap:2px; }
 .dcell { width:52px; }
 .dsuf { font-size:10px; color:#9a8a72; }
