@@ -175,8 +175,9 @@ function Login() {
     <div className="wrap" style={{ display: "grid", placeItems: "center", minHeight: "100vh" }}>
       <style>{CSS}</style>
       <form className="loginbox" onSubmit={go}>
-        <div className="logo" style={{ margin: "0 auto 10px" }}>CAD</div>
-        <div className="title" style={{ textAlign: "center", color: "#2a2018" }}>STOCK LEDGER</div>
+        <div className="logo" style={{ margin: "0 auto 10px" }}>KV</div>
+        <div className="title" style={{ textAlign: "center", color: "#2a2018" }}>KWALITY VENTURES</div>
+        <div className="sub" style={{ textAlign: "center", color: "#6b5a45", marginBottom: 4 }}>Mondelez Distribution · Stock Ledger</div>
         <div className="sub" style={{ textAlign: "center", color: "#6b5a45", marginBottom: 18 }}>Sign in to continue</div>
         <label>Email<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoFocus /></label>
         <label>Password<input type="password" value={pw} onChange={(e) => setPw(e.target.value)} /></label>
@@ -187,6 +188,7 @@ function Login() {
         <div className="sub" style={{ textAlign: "center", color: "#9a8a72", marginTop: 14 }}>
           No account? Ask your administrator.
         </div>
+        <div className="credit" style={{ marginTop: 16 }}>Designed by Jain Ankit and Co, Chartered Accountants</div>
       </form>
     </div>
   );
@@ -1069,10 +1071,10 @@ export default function App() {
       {/* ===== top bar ===== */}
       <div className="topbar">
         <div className="brand">
-          <div className="logo">CAD</div>
+          <div className="logo">KV</div>
           <div>
-            <div className="title">STOCK LEDGER</div>
-            <div className="sub">Cadbury Distribution · Warehouse Inventory</div>
+            <div className="title">KWALITY VENTURES</div>
+            <div className="sub">Mondelez Distribution · Warehouse Inventory</div>
           </div>
         </div>
         <div className="controls">
@@ -1857,6 +1859,8 @@ export default function App() {
           </div>
         </div>
       )}
+
+      <div className="credit">Designed by Jain Ankit and Co, Chartered Accountants</div>
     </div>
   );
 }
@@ -1984,6 +1988,8 @@ const CSS = `
 .rl { font-size:10.5px; text-transform:uppercase; letter-spacing:1px; color:#9a8a72; margin-bottom:5px; }
 .rv { font-size:22px; font-weight:800; color:#2a2018; }
 .rv.sm { font-size:14px; font-weight:700; }
+
+.credit { text-align:center; font-size:11px; color:#9a8a72; padding:14px 18px 18px; letter-spacing:.4px; }
 
 @media (max-width:640px){
   .desc { min-width:150px; max-width:150px; }
