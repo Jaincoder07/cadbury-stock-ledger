@@ -195,6 +195,8 @@ function UploadOpeningPanel({ products, wh, onApply, onClose }) {
       const mi = find(/mrp|price/);
       const bpcI = find(/box(es)? ?\/ ?case|box(es)? per case/);      // ratio: boxes per case
       const ppbI = find(/pcs ?\/ ?box|pcs per box|pieces ?\/ ?box/);  // ratio: pcs per box
+      const wsI = hdr.findIndex((h) => /margin/.test(h) && /ws|whole/.test(h));            // wholesale margin %
+      const rmI = hdr.findIndex((h) => /margin/.test(h) && !/ws|whole/.test(h));           // retailer margin (divisor)
       // opening quantities: plain CASE / BOX / PCS columns (must not contain "/")
       const plain = (re) => hdr.findIndex((h) => re.test(h) && !h.includes("/"));
       const caseI = plain(/^(opening )?cases?$/);
@@ -204,7 +206,7 @@ function UploadOpeningPanel({ products, wh, onApply, onClose }) {
 
       const byCode = {};
       products.forEach((p) => (byCode[p.code.toLowerCase()] = p));
-      const open = {}, newProducts = [], updates = {}, skipped = [];
+      const open = {}, newProducts = [], updates = {}, skipped = [], cfgUpdates = {};
       const seen = new Set();
       for (let i = hi + 1; i < rows.length; i++) {
         const r = rows[i];
@@ -233,9 +235,14 @@ function UploadOpeningPanel({ products, wh, onApply, onClose }) {
           p = { ...p, ...f };
         }
         open[p.code] = toPcs(int(caseI), int(boxI), int(pcsI), p.pcsCase, p.pcsOuter);
+        // per-SKU margins (only stored when the sheet provides a value)
+        const cfg = {};
+        if (rmI >= 0 && num(rmI) > 0) cfg.margin = num(rmI);
+        if (wsI >= 0 && num(wsI) > 0) cfg.ws = num(wsI);
+        if (Object.keys(cfg).length) cfgUpdates[p.code] = cfg;
       }
       if (!Object.keys(open).length) throw new Error("No usable rows found.");
-      setPreview({ open, newProducts, updates, skipped });
+      setPreview({ open, newProducts, updates, skipped, cfgUpdates });
     } catch (e) {
       setErr(e.message || String(e));
     }
@@ -244,7 +251,7 @@ function UploadOpeningPanel({ products, wh, onApply, onClose }) {
   const apply = async () => {
     setBusy(true);
     try {
-      await onApply(asOn, preview.open, preview.newProducts, preview.updates);
+      await onApply(asOn, preview.open, preview.newProducts, preview.updates, preview.cfgUpdates);
       onClose();
     } catch (e) { setErr(e.message || String(e)); }
     setBusy(false);
@@ -254,7 +261,7 @@ function UploadOpeningPanel({ products, wh, onApply, onClose }) {
     <div className="addpanel">
       <div className="aprow">
         <label>Opening as on<input type="date" value={asOn} onChange={(e) => setAsOn(e.target.value)} style={{ width: 140 }} /></label>
-        <label className="wide">Stock sheet (.xlsx / .csv) — CODE, PRODUCT, MRP, BOX/CASE, PCS/BOX, CASE, BOX, PCS
+        <label className="wide">Stock sheet (.xlsx / .csv) — CODE, PRODUCT, MRP, BOX/CASE, PCS/BOX, CASE, BOX, PCS (+ optional RETAILER MARGIN, WS MARGIN %)
           <input type="file" accept=".xlsx,.xls,.csv" onChange={(e) => e.target.files[0] && parseFile(e.target.files[0])} />
         </label>
         {preview && <button className="save" onClick={apply} disabled={busy}>{busy ? "Applying…" : `Apply to ${wh}`}</button>}
@@ -264,6 +271,7 @@ function UploadOpeningPanel({ products, wh, onApply, onClose }) {
         <div className="apwarn" style={{ color: "#1b7f4d" }}>
           ✓ {preview.newProducts.length} new products will be created, {Object.keys(preview.updates).length} existing updated,
           opening stock set for {Object.keys(preview.open).length} products in <b>{wh}</b> as on {asOn}.
+          {Object.keys(preview.cfgUpdates).length > 0 && <> Margins set for {Object.keys(preview.cfgUpdates).length} products.</>}
           {preview.skipped.length > 0 && (
             <div className="aperr">⚠ {preview.skipped.length} rows skipped (missing product/MRP/Box-Case/Pcs-Box): {preview.skipped.slice(0, 12).join(", ")}{preview.skipped.length > 12 ? "…" : ""}</div>
           )}
@@ -822,13 +830,18 @@ export default function App() {
 
   // ---- opening stock upload (admin) ----
   const [showUpload, setShowUpload] = useState(false);
-  const applyOpening = async (asOn, openMap, newProds, updates) => {
+  const applyOpening = async (asOn, openMap, newProds, updates, cfgUpdates) => {
     let next = products || [];
     if (newProds.length || Object.keys(updates).length) {
       next = next.map((p) => (updates[p.code] ? { ...p, ...updates[p.code] } : p));
       next = [...next, ...newProds];
       setProducts(next);
       await kvSet(prodKey(wh), next);
+    }
+    if (cfgUpdates && Object.keys(cfgUpdates).length) {
+      const perSku = { ...config.perSku };
+      Object.entries(cfgUpdates).forEach(([code, c]) => { perSku[code] = { ...(perSku[code] || {}), ...c }; });
+      saveConfig({ ...config, perSku });
     }
     await kvSet(openKey(wh, asOn), openMap);
     if (asOn === date) { setOpening(openMap); }
