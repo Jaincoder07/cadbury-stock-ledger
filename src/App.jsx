@@ -101,6 +101,56 @@ function DecCell({ value, onChange, suffix }) {
   );
 }
 
+// ---------- add product panel ----------
+function AddProductPanel({ products, onAdd, onClose }) {
+  const [f, setF] = useState({ code: "", desc: "", mrp: "", pcsOuter: "", pcsCase: "", oc: "", ob: "", op: "" });
+  const [err, setErr] = useState("");
+  const set = (k) => (e) => setF((p) => ({ ...p, [k]: e.target.value }));
+  const codeTrim = f.code.trim();
+  const dupCode = codeTrim && products.some((p) => p.code.toLowerCase() === codeTrim.toLowerCase());
+  const descTrim = f.desc.trim();
+  const dupDesc = descTrim && products.find((p) => p.desc.trim().toLowerCase() === descTrim.toLowerCase() && Number(p.mrp) === parseFloat(f.mrp));
+
+  const submit = () => {
+    setErr("");
+    if (!codeTrim) return setErr("Code is required.");
+    if (dupCode) return setErr(`Code "${codeTrim}" already exists — codes must be unique.`);
+    if (!descTrim) return setErr("Description is required.");
+    const mrp = parseFloat(f.mrp);
+    if (!(mrp > 0)) return setErr("MRP must be a number greater than 0.");
+    const pcsOuter = parseInt(f.pcsOuter, 10) || 0;
+    const pcsCase = parseInt(f.pcsCase, 10) || 0;
+    if (pcsCase <= 0) return setErr("Pcs/Case must be greater than 0.");
+    if (pcsOuter > pcsCase) return setErr("Pcs/Box cannot exceed Pcs/Case.");
+    if (dupDesc && !window.confirm(`A product with the same description and MRP already exists (code ${dupDesc.code}). Add anyway?`)) return;
+    onAdd({
+      code: codeTrim, desc: descTrim, mrp, pcsOuter, pcsCase,
+      openCase: parseInt(f.oc, 10) || 0, openBox: parseInt(f.ob, 10) || 0, openPcs: parseInt(f.op, 10) || 0,
+    });
+    onClose();
+  };
+
+  return (
+    <div className="addpanel">
+      <div className="aprow">
+        <label>Code<input value={f.code} onChange={set("code")} placeholder="e.g. FUSE60" className={dupCode ? "bad" : ""} /></label>
+        <label className="wide">Description<input value={f.desc} onChange={set("desc")} placeholder="e.g. CADBURY FUSE 55G RS-60" /></label>
+        <label>MRP ₹<input value={f.mrp} onChange={set("mrp")} inputMode="decimal" /></label>
+        <label>Pcs/Box<input value={f.pcsOuter} onChange={set("pcsOuter")} inputMode="numeric" /></label>
+        <label>Pcs/Case<input value={f.pcsCase} onChange={set("pcsCase")} inputMode="numeric" /></label>
+        <label>Open Case<input value={f.oc} onChange={set("oc")} inputMode="numeric" /></label>
+        <label>Open Box<input value={f.ob} onChange={set("ob")} inputMode="numeric" /></label>
+        <label>Open Pcs<input value={f.op} onChange={set("op")} inputMode="numeric" /></label>
+        <button className="save" onClick={submit}>Add Product</button>
+        <button className="ghost2" onClick={onClose}>Cancel</button>
+      </div>
+      {dupCode && <div className="aperr">⚠ Code "{codeTrim}" is already taken.</div>}
+      {!dupCode && dupDesc && <div className="apwarn">⚠ Same description + MRP exists as code {dupDesc.code} — possible duplicate.</div>}
+      {err && <div className="aperr">{err}</div>}
+    </div>
+  );
+}
+
 // ---------- tiny numeric cell ----------
 function NumCell({ value, onChange, accent }) {
   const [v, setV] = useState(value === 0 || value == null ? "" : String(value));
@@ -145,6 +195,26 @@ export default function App() {
   const setSkuCfg = (code, field, val) => {
     const next = { ...config, perSku: { ...config.perSku, [code]: { ...(config.perSku[code] || {}), [field]: val } } };
     saveConfig(next);
+  };
+  const [showAdd, setShowAdd] = useState(false);
+
+  // ---- product master mutations (persist immediately) ----
+  const updateProduct = (code, field, val) => {
+    setProducts((prev) => {
+      const next = prev.map((p) => (p.code === code ? { ...p, [field]: val } : p));
+      sSet(K_PRODUCTS, next);
+      return next;
+    });
+  };
+  const addProduct = (np) => {
+    setProducts((prev) => {
+      const next = [...prev, np];
+      sSet(K_PRODUCTS, next);
+      return next;
+    });
+    // make its opening stock visible on the currently loaded day
+    const op = toPcs(np.openCase, np.openBox, np.openPcs, np.pcsCase, np.pcsOuter);
+    if (op) setOpening((prev) => ({ ...prev, [np.code]: op }));
   };
 
   // ---- load products + warehouses once ----
@@ -436,11 +506,15 @@ export default function App() {
               Our margin&nbsp;
               <DecCell value={config.ourMargin} suffix="%" onChange={(v) => saveConfig({ ...config, ourMargin: v })} />
             </label>
+            <button className="save" onClick={() => setShowAdd(!showAdd)}>{showAdd ? "✕ Close" : "＋ Add Product"}</button>
           </div>
 
+          {showAdd && <AddProductPanel products={products} onAdd={addProduct} onClose={() => setShowAdd(false)} />}
+
           <div className="hint">
-            Pack standards (read-only) drive Case·Box·Pcs → pieces. Editable: <b>Margin</b> (retailer, divisor on MRP),{" "}
-            <b>GST %</b> and <b>WS %</b> (flat % off MRP for wholesalers). Retails = MRP ÷ Margin · RD = Retails ÷ (1 + our %) · Cost = RD ÷ (1 + GST) — used for stock value.
+            <b>MRP, Pcs/Box, Pcs/Case are editable</b> — they update the product master everywhere (entry grid, reports, history display).
+            Also editable: <b>Margin</b> (retailer, divisor on MRP), <b>GST %</b> and <b>WS %</b> (flat % off MRP for wholesalers).
+            Retails = MRP ÷ Margin · RD = Retails ÷ (1 + our %) · Cost = RD ÷ (1 + GST) — used for stock value.
           </div>
 
           <div className="gridwrap">
@@ -471,9 +545,9 @@ export default function App() {
                     <tr key={p.code}>
                       <td className="stick code mono">{p.code}</td>
                       <td className="stick desc">{p.desc}</td>
-                      <td className="num dim">{p.mrp}</td>
-                      <td className="num">{p.pcsOuter || "–"}</td>
-                      <td className="num">{p.pcsCase || "–"}</td>
+                      <td className="inp"><DecCell value={p.mrp} onChange={(v) => { if (v > 0) updateProduct(p.code, "mrp", v); }} /></td>
+                      <td className="inp"><NumCell value={p.pcsOuter} onChange={(v) => updateProduct(p.code, "pcsOuter", Math.max(0, v))} /></td>
+                      <td className="inp"><NumCell value={p.pcsCase} onChange={(v) => { if (v > 0) updateProduct(p.code, "pcsCase", v); }} /></td>
                       <td className="num dim">{p.pcsOuter > 0 ? (p.pcsCase / p.pcsOuter).toFixed(1).replace(/\.0$/, "") : "–"}</td>
                       <td className="inp"><DecCell value={cfg.margin ?? SKU_DEFAULTS.margin} onChange={(v) => setSkuCfg(p.code, "margin", v)} /></td>
                       <td className="inp"><DecCell value={cfg.gst ?? SKU_DEFAULTS.gst} suffix="%" onChange={(v) => setSkuCfg(p.code, "gst", v)} /></td>
@@ -607,6 +681,16 @@ const CSS = `
 .inp { padding:1px 3px; }
 .ncell { width:48px; border:1px solid #e0d4bf; border-radius:4px; padding:3px 4px; text-align:center; font-size:12.5px; background:#fffdf8; font-variant-numeric:tabular-nums; }
 .ncell:focus { outline:none; border-color:#6b1f24; background:#fff; box-shadow:0 0 0 2px rgba(107,31,36,.12); }
+.addpanel { margin:0 18px 10px; padding:12px 14px; background:#fff; border:1.5px solid #6b1f24; border-radius:9px; }
+.aprow { display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; }
+.aprow label { display:flex; flex-direction:column; gap:3px; font-size:10px; text-transform:uppercase; letter-spacing:.6px; color:#6b5a45; font-weight:600; }
+.aprow input { border:1px solid #d2c2a8; border-radius:6px; padding:7px 9px; font-size:13px; width:90px; background:#fffdf8; }
+.aprow input:focus { outline:none; border-color:#6b1f24; box-shadow:0 0 0 2px rgba(107,31,36,.12); }
+.aprow input.bad { border-color:#b3261e; background:#fdecec; }
+.aprow .wide input { width:260px; }
+.ghost2 { background:transparent; border:1px solid #d2c2a8; color:#6b5a45; border-radius:6px; padding:8px 14px; cursor:pointer; font-size:12px; }
+.aperr { margin-top:8px; font-size:12px; color:#b3261e; font-weight:600; }
+.apwarn { margin-top:8px; font-size:12px; color:#8a5a00; font-weight:600; }
 .dwrap { display:inline-flex; align-items:center; gap:2px; }
 .dcell { width:52px; }
 .dsuf { font-size:10px; color:#9a8a72; }
