@@ -787,19 +787,23 @@ export default function App() {
 
   // ---- day totals ----
   const totals = useMemo(() => {
-    let openVal = 0, closeVal = 0;
+    let openVal = 0, closeVal = 0, openCost = 0, closeCost = 0;
     const mvTot = {}; MOVES.forEach((m) => (mvTot[m.key] = 0));
     (products || []).forEach((pr) => {
-      openVal += (opening[pr.code] || 0) * pr.mrp;
-      closeVal += closingPcs(pr.code) * pr.mrp;
+      const o = opening[pr.code] || 0, cl = closingPcs(pr.code);
+      const cost = skuPricing(pr.mrp, config.perSku[pr.code] || {}, config.ourMargin).cost;
+      openVal += o * pr.mrp;
+      closeVal += cl * pr.mrp;
+      openCost += o * cost;
+      closeCost += cl * cost;
       const mv = moves[pr.code];
       if (mv) MOVES.forEach((m) => {
         const c = mv[m.key];
         if (c) mvTot[m.key] += toPcs(c.c, c.b, c.p, pr.pcsCase, pr.pcsOuter);
       });
     });
-    return { openVal, closeVal, mvTot };
-  }, [products, opening, moves, closingPcs]);
+    return { openVal, closeVal, openCost, closeCost, mvTot };
+  }, [products, opening, moves, closingPcs, config]);
 
   // ---- stock-take summary ----
   const stTotals = useMemo(() => {
@@ -932,12 +936,13 @@ export default function App() {
     const cbp = (pcs, p) => { const d = fromPcs(pcs, p.pcsCase, p.pcsOuter); return `${d.c}·${d.b}·${d.p}`; };
 
     // Stock Report
-    const rep = [["Code", "Product", "MRP", "Opening C·B·P", "Opening Pcs", ...MOVES.map((m) => m.label + " Pcs"), "Closing C·B·P", "Closing Pcs", "Physical Pcs", "Diff Pcs", "Value (MRP)"]];
+    const rep = [["Code", "Product", "MRP", "Opening C·B·P", "Opening Pcs", ...MOVES.map((m) => m.label + " Pcs"), "Closing C·B·P", "Closing Pcs", "Physical Pcs", "Diff Pcs", "Stock Value (Cost ex-GST)"]];
     ps.forEach((p) => {
       const o = opening[p.code] || 0, cl = closingPcs(p.code);
       const ct = counts[p.code];
       const phys = ct ? toPcs(ct.c, ct.b, ct.p, p.pcsCase, p.pcsOuter) : "";
-      rep.push([p.code, p.desc, p.mrp, cbp(o, p), o, ...MOVES.map((m) => mvPcs(p, m.key)), cbp(cl, p), cl, phys, ct ? phys - cl : "", cl * p.mrp]);
+      const cost = skuPricing(p.mrp, config.perSku[p.code] || {}, config.ourMargin).cost;
+      rep.push([p.code, p.desc, p.mrp, cbp(o, p), o, ...MOVES.map((m) => mvPcs(p, m.key)), cbp(cl, p), cl, phys, ct ? phys - cl : "", +(cl * cost).toFixed(2)]);
     });
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rep), "Stock Report");
 
@@ -1223,27 +1228,31 @@ export default function App() {
                       <tr>
                         <th className="stick code">Code</th>
                         <th className="stick desc">Product</th>
+                        <th className="grp">Opening<br /><span>C · B · P</span></th>
                         <th className="num">Opening Pcs</th>
                         {MOVES.map((m) => <th key={m.key} className="num" style={{ color: m.color }}>{m.label}</th>)}
                         <th className="num">Net Pcs</th>
                         <th className="grp closing">Closing C·B·P</th>
                         <th className="num closing">Closing Pcs</th>
-                        <th className="num">Value (MRP)</th>
+                        <th className="num">Stock Value<br /><span>Cost ex-GST</span></th>
                       </tr>
                     </thead>
                     <tbody>
                       {rowsM.map(({ p, o, s, net, cl }) => {
                         const cd = fromPcs(cl, p.pcsCase, p.pcsOuter);
+                        const od = fromPcs(o, p.pcsCase, p.pcsOuter);
+                        const cost = skuPricing(p.mrp, config.perSku[p.code] || {}, config.ourMargin).cost;
                         return (
                           <tr key={p.code} className={cl < 0 ? "rneg" : ""}>
                             <td className="stick code mono">{p.code}</td>
                             <td className="stick desc">{p.desc}</td>
+                            <td className="cbp">{od.c}·{od.b}·{od.p}</td>
                             <td className="num dim">{o}</td>
                             {MOVES.map((m) => <td key={m.key} className="num dim">{s[m.key] || ""}</td>)}
                             <td className={"num " + (net < 0 ? "negtxt" : net > 0 ? "oktxt" : "dim")}>{net !== 0 ? (net > 0 ? "+" : "") + net : ""}</td>
                             <td className={"cbp closing" + (cl < 0 ? " negtxt" : "")}>{cd.c}·{cd.b}·{cd.p}</td>
                             <td className={"num closing" + (cl < 0 ? " negtxt" : "")}>{cl}</td>
-                            <td className="num">{inr(cl * p.mrp)}</td>
+                            <td className="num">{inr(cl * cost)}</td>
                           </tr>
                         );
                       })}
@@ -1251,11 +1260,15 @@ export default function App() {
                     <tfoot>
                       {(() => {
                         const t = { open: 0, net: 0, cl: 0, val: 0 };
-                        rowsM.forEach((r) => { t.open += r.o; t.net += r.net; t.cl += r.cl; t.val += r.cl * r.p.mrp; });
+                        rowsM.forEach((r) => {
+                          const cost = skuPricing(r.p.mrp, config.perSku[r.p.code] || {}, config.ourMargin).cost;
+                          t.open += r.o; t.net += r.net; t.cl += r.cl; t.val += r.cl * cost;
+                        });
                         return (
                           <tr className="trow">
                             <td className="stick code">TOTAL</td>
                             <td className="stick desc">{rowsM.length} products</td>
+                            <td></td>
                             <td className="num">{t.open}</td>
                             {MOVES.map((m) => <td key={m.key} className="num" style={{ color: m.color }}>{tot(m.key) || ""}</td>)}
                             <td className={"num " + (t.net < 0 ? "negtxt" : t.net > 0 ? "oktxt" : "")}>{t.net !== 0 ? (t.net > 0 ? "+" : "") + t.net : ""}</td>
@@ -1753,8 +1766,8 @@ export default function App() {
             </label>
           </div>
           <div className="rcards">
-            <div className="rcard"><div className="rl">Opening Value</div><div className="rv">{inr(totals.openVal)}</div></div>
-            <div className="rcard"><div className="rl">Closing Value</div><div className="rv">{inr(totals.closeVal)}</div></div>
+            <div className="rcard"><div className="rl">Opening Value (Cost ex-GST)</div><div className="rv">{inr(totals.openCost)}</div></div>
+            <div className="rcard"><div className="rl">Closing Value (Cost ex-GST)</div><div className="rv">{inr(totals.closeCost)}</div></div>
             <div className="rcard"><div className="rl">Stock In (pcs)</div><div className="rv" style={{ color: "#1b7f4d" }}>{totals.mvTot.in}</div></div>
             <div className="rcard"><div className="rl">Stock Out (pcs)</div><div className="rv" style={{ color: "#b3261e" }}>{totals.mvTot.out}</div></div>
             <div className="rcard"><div className="rl">Warehouse</div><div className="rv sm">{wh}</div></div>
@@ -1767,13 +1780,14 @@ export default function App() {
                   <th className="stick code">Code</th>
                   <th className="stick desc">Product</th>
                   <th className="num">MRP</th>
-                  <th className="grp">Opening</th>
+                  <th className="grp">Opening<br /><span>C · B · P</span></th>
+                  <th className="num">Open<br /><span>Pcs</span></th>
                   {MOVES.map((m) => <th key={m.key} className="num" style={{ color: m.color }}>{m.label}</th>)}
                   <th className="grp closing">Closing</th>
                   <th className="num closing">Close<br /><span>Pcs</span></th>
                   <th className="num" style={{ color: "#0a6e7a" }}>Physical<br /><span>Pcs</span></th>
                   <th className="num">Diff<br /><span>Pcs</span></th>
-                  <th className="num">Value</th>
+                  <th className="num">Stock Value<br /><span>Cost ex-GST</span></th>
                 </tr>
               </thead>
               <tbody>
@@ -1785,12 +1799,14 @@ export default function App() {
                   const ct = counts[p.code];
                   const phys = ct ? toPcs(ct.c, ct.b, ct.p, p.pcsCase, p.pcsOuter) : null;
                   const d = ct ? phys - cl : null;
+                  const cost = skuPricing(p.mrp, config.perSku[p.code] || {}, config.ourMargin).cost;
                   return (
                     <tr key={p.code} className={cl < 0 ? "rneg" : ""}>
                       <td className="stick code mono">{p.code}</td>
                       <td className="stick desc">{p.desc}</td>
                       <td className="num dim">{p.mrp}</td>
                       <td className="cbp">{fromPcs(o, p.pcsCase, p.pcsOuter).c}·{fromPcs(o, p.pcsCase, p.pcsOuter).b}·{fromPcs(o, p.pcsCase, p.pcsOuter).p}</td>
+                      <td className="num dim">{o}</td>
                       {MOVES.map((m) => {
                         const c = mv[m.key];
                         const t = c ? toPcs(c.c, c.b, c.p, p.pcsCase, p.pcsOuter) : 0;
@@ -1802,7 +1818,7 @@ export default function App() {
                       <td className={"num " + (d === null ? "dim" : d < 0 ? "negtxt" : d > 0 ? "exctxt" : "oktxt")}>
                         {d === null ? "" : d === 0 ? "✓" : (d > 0 ? "+" : "") + d}
                       </td>
-                      <td className="num">{inr(cl * p.mrp)}</td>
+                      <td className="num">{inr(cl * cost)}</td>
                     </tr>
                   );
                 })}
@@ -1813,7 +1829,8 @@ export default function App() {
                   MOVES.forEach((m) => (t.mv[m.key] = 0));
                   rows.forEach((p) => {
                     const o = opening[p.code] || 0, cl = closingPcs(p.code);
-                    t.open += o; t.cl += cl; t.val += cl * p.mrp;
+                    const cost = skuPricing(p.mrp, config.perSku[p.code] || {}, config.ourMargin).cost;
+                    t.open += o; t.cl += cl; t.val += cl * cost;
                     const mv = moves[p.code] || {};
                     MOVES.forEach((m) => { const c = mv[m.key]; if (c) t.mv[m.key] += toPcs(c.c, c.b, c.p, p.pcsCase, p.pcsOuter); });
                     const ct = counts[p.code];
@@ -1824,7 +1841,8 @@ export default function App() {
                       <td className="stick code">TOTAL</td>
                       <td className="stick desc">{rows.length} products</td>
                       <td></td>
-                      <td className="num">{t.open} pcs</td>
+                      <td></td>
+                      <td className="num">{t.open}</td>
                       {MOVES.map((m) => <td key={m.key} className="num" style={{ color: m.color }}>{t.mv[m.key] || ""}</td>)}
                       <td></td>
                       <td className="num">{t.cl}</td>
