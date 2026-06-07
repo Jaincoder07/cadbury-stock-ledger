@@ -1934,7 +1934,7 @@ const CSS = `
 .hfitem { display:flex; align-items:center; gap:6px; font-size:12px; padding:3px 2px; color:#2a2018; cursor:pointer; }
 .hfitem:hover { background:#faf6ee; }
 .hfempty { font-size:11px; color:#9a8a72; padding:4px; }
-.hfback { position:fixed; inset:0; z-index:50; }
+.hfback { position:fixed; inset:0; z-index:7; }
 .trow td { position:sticky; bottom:0; background:#efe6d6 !important; font-weight:700; border-top:2px solid #d2c2a8; z-index:2; }
 .trow td.stick { z-index:3; }
 .rneg td { background:#fdecec !important; }
