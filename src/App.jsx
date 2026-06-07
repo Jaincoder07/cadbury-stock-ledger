@@ -106,17 +106,18 @@ function DecCell({ value, onChange, suffix }) {
 async function resolveOpening(whName, d, prods, preloaded) {
   const direct = preloaded?.[openKey(whName, d)];
   if (direct) return direct;
-  const LOOKBACK = 62;
-  const keys = [];
+  const LOOKBACK = 120;
+  const keys = [openKey(whName, d)];   // the day itself may hold an uploaded snapshot
   for (let i = 1; i <= LOOKBACK; i++) {
     const dd = addDays(d, -i);
     keys.push(openKey(whName, dd), mvKey(whName, dd));
   }
   const hist = await kvGetMany(keys);
   let baseIdx = -1;
-  for (let i = 1; i <= LOOKBACK; i++) {
+  for (let i = 0; i <= LOOKBACK; i++) {
     if (hist[openKey(whName, addDays(d, -i))]) { baseIdx = i; break; }
   }
+  if (baseIdx === 0) return hist[openKey(whName, d)];
   if (baseIdx < 0) return {};
   const open = { ...hist[openKey(whName, addDays(d, -baseIdx))] };
   const byCode = {};
@@ -761,18 +762,13 @@ export default function App() {
   };
 
   // ---- save day ----
+  // Only the day's movements are saved. Openings are never stamped per-day:
+  // every day's opening is computed live from the uploaded opening snapshot
+  // plus all saved movements since — so the chain can never go stale.
   const save = async () => {
     setSaving(true);
     try {
-      const close = {};
-      (products || []).forEach((pr) => { close[pr.code] = closingPcs(pr.code); });
-      await Promise.all([
-        kvSet(mvKey(wh, date), moves),
-        kvSet(openKey(wh, date), opening),            // lock opening so it's stable
-        kvSet(openKey(wh, addDays(date, 1)), close),  // closing → tomorrow's opening
-      ]);
-      // editing a past day makes any later stamped openings wrong — clear them
-      await invalidateAfter(wh, addDays(date, 1));
+      await kvSet(mvKey(wh, date), moves);
       setSavedAt(new Date());
       setDbError(null);
     } catch (e) {
@@ -861,18 +857,15 @@ export default function App() {
     (async () => {
       setMonthly(null);
       try {
-        const [mvRows, opRows] = await Promise.all([
+        const baseDate = `${month}-01`;
+        const [mvRows, baseOpen] = await Promise.all([
           kvGetLike(`cad:mv:${wh}:${month}-%`),
-          kvGetLike(`cad:open:${wh}:${month}-%`),
+          resolveOpening(wh, baseDate, products),   // opening as on the 1st, computed live
         ]);
         if (!alive) return;
-        opRows.sort((a, b) => (a.key < b.key ? -1 : 1));
-        const baseDate = opRows.length ? opRows[0].key.slice(-10) : null;
-        const baseOpen = opRows.length ? opRows[0].value : {};
         const sums = {}; const days = new Set();
         mvRows.forEach((r) => {
           const d = r.key.slice(-10);
-          if (baseDate && d < baseDate) return;
           days.add(d);
           Object.entries(r.value || {}).forEach(([code, mv]) => {
             const p = prodByCode[code];
