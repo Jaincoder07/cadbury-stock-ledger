@@ -68,6 +68,7 @@ const skuPricing = (mrp, cfg, ourMargin) => {
 };
 const mvKey = (wh, date) => `cad:mv:${wh}:${date}`;       // movements for a warehouse-day
 const openKey = (wh, date) => `cad:open:${wh}:${date}`;   // opening snapshot (carry)
+const countKey = (wh, date) => `cad:count:${wh}:${date}`; // physical stock-take counts
 
 function sGet(key) {
   try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : null; }
@@ -197,6 +198,26 @@ export default function App() {
     saveConfig(next);
   };
   const [showAdd, setShowAdd] = useState(false);
+
+  // ---- physical stock take (per warehouse-day, auto-saved) ----
+  const [counts, setCounts] = useState({});          // code -> {c,b,p}; row present = counted
+  const [onlyDiff, setOnlyDiff] = useState(false);
+  useEffect(() => { setCounts(sGet(countKey(wh, date)) || {}); }, [wh, date]);
+  const setCount = (code, dim, val) => {
+    setCounts((prev) => {
+      const next = { ...prev, [code]: { ...(prev[code] || { c: 0, b: 0, p: 0 }), [dim]: val } };
+      sSet(countKey(wh, date), next);
+      return next;
+    });
+  };
+  const clearCount = (code) => {
+    setCounts((prev) => {
+      const next = { ...prev };
+      delete next[code];
+      sSet(countKey(wh, date), next);
+      return next;
+    });
+  };
 
   // ---- product master mutations (persist immediately) ----
   const updateProduct = (code, field, val) => {
@@ -356,6 +377,23 @@ export default function App() {
     return { openVal, closeVal, mvTot };
   }, [products, opening, moves, closingPcs]);
 
+  // ---- stock-take summary ----
+  const stTotals = useMemo(() => {
+    let counted = 0, matched = 0, short = 0, excess = 0, shortPcs = 0, excessPcs = 0, diffVal = 0;
+    (products || []).forEach((pr) => {
+      const ct = counts[pr.code];
+      if (!ct) return;
+      counted++;
+      const phys = toPcs(ct.c, ct.b, ct.p, pr.pcsCase, pr.pcsOuter);
+      const d = phys - closingPcs(pr.code);
+      if (d === 0) matched++;
+      else if (d < 0) { short++; shortPcs += -d; }
+      else { excess++; excessPcs += d; }
+      diffVal += d * pr.mrp;
+    });
+    return { counted, matched, short, excess, shortPcs, excessPcs, diffVal };
+  }, [products, counts, closingPcs]);
+
   // ---- warehouse management ----
   const addWarehouse = async () => {
     const name = prompt("New warehouse name:");
@@ -405,17 +443,18 @@ export default function App() {
       {/* ===== tabs ===== */}
       <div className="tabs">
         <button className={tab === "entry" ? "tab on" : "tab"} onClick={() => setTab("entry")}>Daily Entry</button>
+        <button className={tab === "stocktake" ? "tab on" : "tab"} onClick={() => setTab("stocktake")}>Stock Take</button>
         <button className={tab === "report" ? "tab on" : "tab"} onClick={() => setTab("report")}>Stock Report</button>
         <button className={tab === "config" ? "tab on" : "tab"} onClick={() => setTab("config")}>Configuration</button>
         <div className="spacer" />
-        {tab !== "config" && (
+        {tab !== "config" && tab !== "stocktake" && (
           <div className="savebox">
             {savedAt && <span className="saved">✓ saved {savedAt.toLocaleTimeString()}</span>}
             {!savedAt && <span className="unsaved">unsaved changes</span>}
             <button className="save" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save Day"}</button>
           </div>
         )}
-        {tab === "config" && <span className="saved" style={{ padding: "8px 0" }}>changes save automatically</span>}
+        {(tab === "config" || tab === "stocktake") && <span className="saved" style={{ padding: "8px 0" }}>changes save automatically</span>}
       </div>
 
       {/* ===== entry ===== */}
@@ -493,6 +532,93 @@ export default function App() {
               ))}
             </div>
             <div>Opening <b>{inr(totals.openVal)}</b> → Closing <b>{inr(totals.closeVal)}</b></div>
+          </div>
+        </>
+      )}
+
+      {/* ===== stock take ===== */}
+      {tab === "stocktake" && (
+        <>
+          <div className="rcards">
+            <div className="rcard"><div className="rl">Counted</div><div className="rv">{stTotals.counted}<span className="rsub"> / {products.length}</span></div></div>
+            <div className="rcard"><div className="rl">Matched</div><div className="rv" style={{ color: "#1b7f4d" }}>{stTotals.matched}</div></div>
+            <div className="rcard"><div className="rl">Short</div><div className="rv" style={{ color: "#b3261e" }}>{stTotals.short}<span className="rsub"> items · {stTotals.shortPcs} pcs</span></div></div>
+            <div className="rcard"><div className="rl">Excess</div><div className="rv" style={{ color: "#8a5a00" }}>{stTotals.excess}<span className="rsub"> items · {stTotals.excessPcs} pcs</span></div></div>
+            <div className="rcard"><div className="rl">Net Diff Value (MRP)</div><div className="rv" style={{ color: stTotals.diffVal < 0 ? "#b3261e" : stTotals.diffVal > 0 ? "#8a5a00" : "#1b7f4d" }}>{inr(stTotals.diffVal)}</div></div>
+          </div>
+
+          <div className="toolbar">
+            <input className="search" placeholder="Search product or code…" value={query} onChange={(e) => setQuery(e.target.value)} />
+            <label className="zt">
+              <input type="checkbox" checked={onlyDiff} onChange={(e) => setOnlyDiff(e.target.checked)} />
+              only differences
+            </label>
+          </div>
+
+          <div className="hint">
+            Enter the <b>physical count</b> as Case · Box · Pcs after counting the warehouse. Diff = Physical − System Closing
+            (closing includes all of today's In/Out/Wholesale/Retail/Edit). Untouched rows are treated as <b>not counted</b> — use ⟲ to un-count a row.
+          </div>
+
+          <div className="gridwrap">
+            <table className="grid">
+              <thead>
+                <tr>
+                  <th className="stick code">Code</th>
+                  <th className="stick desc">Product</th>
+                  <th className="grp closing">System Closing<br /><span>C · B · P</span></th>
+                  <th className="num closing">Pcs</th>
+                  <th className="grp" style={{ color: "#0a6e7a" }}>Physical<br /><span>Case</span></th>
+                  <th className="grp" style={{ color: "#0a6e7a" }}><br /><span>Box</span></th>
+                  <th className="grp" style={{ color: "#0a6e7a" }}><br /><span>Pcs</span></th>
+                  <th className="num">Physical Pcs</th>
+                  <th className="num">Diff Pcs</th>
+                  <th className="grp">Diff<br /><span>C · B · P</span></th>
+                  <th className="num">Diff ₹</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((p) => {
+                  const cl = closingPcs(p.code);
+                  const cd = fromPcs(cl, p.pcsCase, p.pcsOuter);
+                  const ct = counts[p.code];
+                  const phys = ct ? toPcs(ct.c, ct.b, ct.p, p.pcsCase, p.pcsOuter) : null;
+                  const d = ct ? phys - cl : null;
+                  if (onlyDiff && (d === null || d === 0)) return null;
+                  const dd = ct ? fromPcs(d, p.pcsCase, p.pcsOuter) : null;
+                  const cls = d === null ? "" : d === 0 ? "rok" : d < 0 ? "rneg" : "rexc";
+                  return (
+                    <tr key={p.code} className={cls}>
+                      <td className="stick code mono">{p.code}</td>
+                      <td className="stick desc">{p.desc}</td>
+                      <td className="cbp closing">{cd.c}·{cd.b}·{cd.p}</td>
+                      <td className="num closing">{cl}</td>
+                      <td className="inp"><NumCell value={ct ? ct.c : 0} accent="#0a6e7a" onChange={(v) => setCount(p.code, "c", v)} /></td>
+                      <td className="inp"><NumCell value={ct ? ct.b : 0} accent="#0a6e7a" onChange={(v) => setCount(p.code, "b", v)} /></td>
+                      <td className="inp"><NumCell value={ct ? ct.p : 0} accent="#0a6e7a" onChange={(v) => setCount(p.code, "p", v)} /></td>
+                      <td className="num">{ct ? phys : "–"}</td>
+                      <td className={"num " + (d === null ? "dim" : d < 0 ? "negtxt" : d > 0 ? "exctxt" : "oktxt")}>
+                        {d === null ? "not counted" : d === 0 ? "✓ 0" : (d > 0 ? "+" : "") + d}
+                      </td>
+                      <td className="cbp">{ct && d !== 0 ? `${dd.c}·${dd.b}·${dd.p}` : ""}</td>
+                      <td className={"num " + (d ? (d < 0 ? "negtxt" : "exctxt") : "dim")}>{ct && d !== 0 ? inr(d * p.mrp) : ""}</td>
+                      <td className="inp">{ct && <button className="unct" title="Clear count (mark not counted)" onClick={() => clearCount(p.code)}>⟲</button>}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="footbar">
+            <div>Showing <b>{rows.length}</b> / {products.length} products</div>
+            <div className="ftot">
+              <span style={{ color: "#1b7f4d" }}>Matched: <b>{stTotals.matched}</b></span>
+              <span style={{ color: "#b3261e" }}>Short: <b>{stTotals.shortPcs}</b> pcs</span>
+              <span style={{ color: "#8a5a00" }}>Excess: <b>{stTotals.excessPcs}</b> pcs</span>
+            </div>
+            <div>Net diff <b style={{ color: stTotals.diffVal < 0 ? "#b3261e" : "#2a2018" }}>{inr(stTotals.diffVal)}</b> at MRP</div>
           </div>
         </>
       )}
@@ -696,6 +822,13 @@ const CSS = `
 .dsuf { font-size:10px; color:#9a8a72; }
 .rneg td { background:#fdecec !important; }
 .negtxt { color:#b3261e !important; }
+.rexc td { background:#fdf6e3 !important; }
+.rok td { background:#f0f7f0 !important; }
+.exctxt { color:#8a5a00 !important; font-weight:600; }
+.oktxt { color:#1b7f4d !important; font-weight:600; }
+.rsub { font-size:11px; font-weight:500; color:#9a8a72; }
+.unct { background:transparent; border:1px solid #d2c2a8; border-radius:4px; color:#6b5a45; cursor:pointer; font-size:12px; padding:2px 7px; }
+.unct:hover { background:#f4efe6; }
 
 .footbar { display:flex; justify-content:space-between; align-items:center; gap:18px; padding:11px 22px; font-size:12px; color:#5b4a3a; flex-wrap:wrap; }
 .ftot { display:flex; gap:14px; flex-wrap:wrap; }
