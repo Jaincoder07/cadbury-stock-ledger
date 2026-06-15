@@ -1086,7 +1086,9 @@ export default function App() {
           </div>
         </div>
         <div className="controls">
-          <select className="whsel" value={wh} onChange={(e) => setWh(e.target.value)} title="Warehouse">
+          <select className="whsel" value={wh} title="Warehouse"
+            onChange={(e) => { setWh(e.target.value); e.target.blur(); }}
+            onKeyDown={(e) => { if (e.altKey || e.metaKey || e.ctrlKey) e.preventDefault(); }}>
             {allowedWh.map((w) => <option key={w}>{w}</option>)}
           </select>
           {isAdmin && <button className="ghost icon" onClick={addWarehouse} title="Add warehouse">＋</button>}
