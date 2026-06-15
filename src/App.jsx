@@ -639,7 +639,11 @@ export default function App() {
   const [profile, setProfile] = useState(null);         // current user's entry
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
+    // only react to a genuine change of user — ignore TOKEN_REFRESHED / focus events,
+    // which otherwise re-run the loader and reset the selected warehouse
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
+      setSession((prev) => (prev?.user?.id === s?.user?.id ? prev : s));
+    });
     return () => sub.subscription.unsubscribe();
   }, []);
   const myEmail = session?.user?.email?.toLowerCase() || null;
@@ -665,9 +669,11 @@ export default function App() {
         setUsersMap(u);
         const prof = u[em] || null;
         setProfile(prof);
-        // initial warehouse = first one this user may access
+        // initial warehouse = last used (if still allowed), else first accessible
         const allowed = prof?.role === "admin" ? w : w.filter((x) => (prof?.warehouses || []).includes(x));
-        setWh(allowed[0] || "");
+        let last = null;
+        try { last = localStorage.getItem("cad:lastwh"); } catch { /* ignore */ }
+        setWh(allowed.includes(last) ? last : (allowed[0] || ""));
         setDbError(null);
       } catch (e) {
         setDbError(e.message || String(e));
@@ -1087,7 +1093,7 @@ export default function App() {
         </div>
         <div className="controls">
           <select className="whsel" value={wh} title="Warehouse"
-            onChange={(e) => { setWh(e.target.value); e.target.blur(); }}
+            onChange={(e) => { setWh(e.target.value); try { localStorage.setItem("cad:lastwh", e.target.value); } catch { /* ignore */ } e.target.blur(); }}
             onKeyDown={(e) => { if (e.altKey || e.metaKey || e.ctrlKey) e.preventDefault(); }}>
             {allowedWh.map((w) => <option key={w}>{w}</option>)}
           </select>
