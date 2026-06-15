@@ -49,6 +49,25 @@ const fromPcs = (total, pcsCase, pcsOuter) => {
   return { c: c * s, b: b * s, p: p * s };
 };
 
+// --- per-unit Case·Box·Pcs model (stock kept literally as entered, never re-bundled) ---
+const ZERO = { c: 0, b: 0, p: 0 };
+// normalize any stored opening value (legacy number, or {c,b,p}) to a raw {c,b,p}
+const asCBP = (v, pr) => {
+  if (v == null) return { ...ZERO };
+  if (typeof v === "number") return fromPcs(v, pr.pcsCase, pr.pcsOuter);
+  return { c: v.c || 0, b: v.b || 0, p: v.p || 0 };
+};
+const cbpPcs = (cbp, pr) => toPcs(cbp.c, cbp.b, cbp.p, pr.pcsCase, pr.pcsOuter);
+// opening ± each day's movements, component by component (no carrying between units)
+const computeClosing = (openCBP, mv) => {
+  let c = openCBP.c || 0, b = openCBP.b || 0, p = openCBP.p || 0;
+  if (mv) MOVES.forEach((m) => {
+    const cell = mv[m.key];
+    if (cell) { c += m.sign * (cell.c || 0); b += m.sign * (cell.b || 0); p += m.sign * (cell.p || 0); }
+  });
+  return { c, b, p };
+};
+
 // storage keys
 const prodKey = (wh) => `cad:products:${wh}`;             // product master — separate per warehouse
 const K_WAREHOUSES = "cad:warehouses";
@@ -116,21 +135,26 @@ async function resolveOpening(whName, d, prods) {
   opens.sort((a, b) => (a.key < b.key ? 1 : -1));   // newest first
   const base = opens[0];
   const baseDate = base.key.slice(-10);
-  if (baseDate === d) return base.value;
-  const open = { ...base.value };
   const byCode = {};
   prods.forEach((p) => (byCode[p.code] = p));
+  // start from the snapshot, as raw {c,b,p} (legacy numeric snapshots are converted)
+  const open = {};
+  Object.entries(base.value || {}).forEach(([code, v]) => {
+    const pr = byCode[code];
+    open[code] = pr ? asCBP(v, pr) : (typeof v === "number" ? { c: 0, b: 0, p: v } : { c: v.c || 0, b: v.b || 0, p: v.p || 0 });
+  });
+  if (baseDate === d) return open;
+  // roll movements forward, component by component (no re-bundling)
   const mvRows = mvAll.filter((r) => r.key.slice(-10) >= baseDate);
   mvRows.forEach((r) => {
     Object.entries(r.value || {}).forEach(([code, row]) => {
-      const pr = byCode[code];
-      if (!pr || !row) return;
-      let net = 0;
+      if (!byCode[code] || !row) return;
+      const cur = open[code] || { ...ZERO };
       MOVES.forEach((mm) => {
         const cell = row[mm.key];
-        if (cell) net += mm.sign * toPcs(cell.c, cell.b, cell.p, pr.pcsCase, pr.pcsOuter);
+        if (cell) { cur.c += mm.sign * (cell.c || 0); cur.b += mm.sign * (cell.b || 0); cur.p += mm.sign * (cell.p || 0); }
       });
-      open[code] = (open[code] || 0) + net;
+      open[code] = cur;
     });
   });
   return open;
@@ -142,14 +166,14 @@ function aggWarehouse(prods, open, mvs, config) {
   const mvTot = {}; MOVES.forEach((m) => (mvTot[m.key] = 0));
   const list = [];
   prods.forEach((p) => {
-    const o = open[p.code] || 0;
-    let net = 0;
+    const oCBP = open[p.code] || { ...ZERO };
+    const o = cbpPcs(oCBP, p);
     const mv = mvs[p.code];
     if (mv) MOVES.forEach((m) => {
       const c = mv[m.key];
-      if (c) { const t = toPcs(c.c, c.b, c.p, p.pcsCase, p.pcsOuter); mvTot[m.key] += t; net += m.sign * t; }
+      if (c) mvTot[m.key] += toPcs(c.c, c.b, c.p, p.pcsCase, p.pcsOuter);
     });
-    const cl = o + net;
+    const cl = cbpPcs(computeClosing(oCBP, mv), p);
     openVal += o * p.mrp; closeVal += cl * p.mrp;
     costVal += cl * skuPricing(p.mrp, config.perSku[p.code] || {}, config.ourMargin).cost;
     if (cl < 0) neg++;
@@ -277,7 +301,7 @@ function UploadOpeningPanel({ products, wh, onApply, onClose }) {
           if (Object.keys(f).length) updates[p.code] = f;
           p = { ...p, ...f };
         }
-        open[p.code] = toPcs(int(caseI), int(boxI), int(pcsI), p.pcsCase, p.pcsOuter);
+        open[p.code] = { c: int(caseI), b: int(boxI), p: int(pcsI) };   // raw, exactly as entered
         // per-SKU margins (only stored when the sheet provides a value)
         const cfg = {};
         if (rmI >= 0 && num(rmI) > 0) cfg.margin = num(rmI);
@@ -524,7 +548,7 @@ export default function App() {
   const [wh, setWh] = useState(WAREHOUSES_DEFAULT[0]);
   const [date, setDate] = useState(todayStr());
   const [moves, setMoves] = useState({});       // code -> {in:{c,b,p}, out:{...}, ...}
-  const [opening, setOpening] = useState({});    // code -> pcs (carried)
+  const [opening, setOpening] = useState({});    // code -> {c,b,p} (raw, carried)
   const [query, setQuery] = useState("");
   const [activeMove, setActiveMove] = useState("in");
   const [saving, setSaving] = useState(false);
@@ -624,9 +648,9 @@ export default function App() {
       kvSetBg(prodKey(wh), next);
       return next;
     });
-    // make its opening stock visible on the currently loaded day
-    const op = toPcs(np.openCase, np.openBox, np.openPcs, np.pcsCase, np.pcsOuter);
-    if (op) setOpening((prev) => ({ ...prev, [np.code]: op }));
+    // make its opening stock visible on the currently loaded day (raw C·B·P)
+    if (np.openCase || np.openBox || np.openPcs)
+      setOpening((prev) => ({ ...prev, [np.code]: { c: np.openCase || 0, b: np.openBox || 0, p: np.openPcs || 0 } }));
   };
 
   const [dbError, setDbError] = useState(null);
@@ -734,18 +758,21 @@ export default function App() {
     const m = {}; (products || []).forEach((p) => (m[p.code] = p)); return m;
   }, [products]);
 
-  // ---- closing per product (pcs) ----
+  // ---- closing per product (raw C·B·P, component-wise) ----
+  const closingCBP = useCallback((code) => {
+    return computeClosing(opening[code] || { ...ZERO }, moves[code]);
+  }, [opening, moves]);
+  // total pcs of closing (for valuation / negative checks)
   const closingPcs = useCallback((code) => {
     const pr = prodByCode[code]; if (!pr) return 0;
-    const o = opening[code] || 0;
-    let net = 0;
-    const mv = moves[code];
-    if (mv) MOVES.forEach((m) => {
-      const cell = mv[m.key];
-      if (cell) net += m.sign * toPcs(cell.c, cell.b, cell.p, pr.pcsCase, pr.pcsOuter);
-    });
-    return o + net;
-  }, [opening, moves, prodByCode]);
+    return cbpPcs(closingCBP(code), pr);
+  }, [closingCBP, prodByCode]);
+  // opening as raw C·B·P and its total pcs
+  const openCBP = useCallback((code) => opening[code] || { ...ZERO }, [opening]);
+  const openPcs = useCallback((code) => {
+    const pr = prodByCode[code]; if (!pr) return 0;
+    return cbpPcs(openCBP(code), pr);
+  }, [openCBP, prodByCode]);
 
   // ---- update a single cell ----
   const setCell = (code, moveKey, dim, val) => {
@@ -808,8 +835,8 @@ export default function App() {
       if (mrpSel && !mrpSel.includes(String(p.mrp))) return false;
       if (!showZero && tab !== "config") {
         const hasMv = moves[p.code] && Object.values(moves[p.code]).some((c) => c && (c.c || c.b || c.p));
-        const o = opening[p.code] || 0;
-        if (!hasMv && o === 0) return false;
+        const o = opening[p.code] || ZERO;
+        if (!hasMv && !o.c && !o.b && !o.p) return false;
       }
       return true;
     });
@@ -820,7 +847,7 @@ export default function App() {
     let openVal = 0, closeVal = 0, openCost = 0, closeCost = 0;
     const mvTot = {}; MOVES.forEach((m) => (mvTot[m.key] = 0));
     (products || []).forEach((pr) => {
-      const o = opening[pr.code] || 0, cl = closingPcs(pr.code);
+      const o = openPcs(pr.code), cl = closingPcs(pr.code);
       const cost = skuPricing(pr.mrp, config.perSku[pr.code] || {}, config.ourMargin).cost;
       openVal += o * pr.mrp;
       closeVal += cl * pr.mrp;
@@ -833,7 +860,7 @@ export default function App() {
       });
     });
     return { openVal, closeVal, openCost, closeCost, mvTot };
-  }, [products, opening, moves, closingPcs, config]);
+  }, [products, openPcs, moves, closingPcs, config]);
 
   // ---- stock-take summary ----
   const stTotals = useMemo(() => {
@@ -897,8 +924,12 @@ export default function App() {
           Object.entries(r.value || {}).forEach(([code, mv]) => {
             const p = prodByCode[code];
             if (!p || !mv) return;
-            if (!sums[code]) { sums[code] = {}; MOVES.forEach((m) => (sums[code][m.key] = 0)); }
-            MOVES.forEach((m) => { const c = mv[m.key]; if (c) sums[code][m.key] += toPcs(c.c, c.b, c.p, p.pcsCase, p.pcsOuter); });
+            // accumulate movement quantities per unit (Case/Box/Pcs) across the month
+            if (!sums[code]) { sums[code] = {}; MOVES.forEach((m) => (sums[code][m.key] = { c: 0, b: 0, p: 0 })); }
+            MOVES.forEach((m) => {
+              const c = mv[m.key];
+              if (c) { sums[code][m.key].c += c.c || 0; sums[code][m.key].b += c.b || 0; sums[code][m.key].p += c.p || 0; }
+            });
           });
         });
         setMonthly({ baseOpen, baseDate, sums, days: days.size });
@@ -963,16 +994,16 @@ export default function App() {
       const c = (moves[p.code] || {})[key];
       return c ? toPcs(c.c, c.b, c.p, p.pcsCase, p.pcsOuter) : 0;
     };
-    const cbp = (pcs, p) => { const d = fromPcs(pcs, p.pcsCase, p.pcsOuter); return `${d.c}·${d.b}·${d.p}`; };
+    const cbpStr = (x) => `${x.c}·${x.b}·${x.p}`;   // raw, as entered
 
     // Stock Report
     const rep = [["Code", "Product", "MRP", "Opening C·B·P", "Opening Pcs", ...MOVES.map((m) => m.label + " Pcs"), "Closing C·B·P", "Closing Pcs", "Physical Pcs", "Diff Pcs", "Stock Value (Cost ex-GST)"]];
     ps.forEach((p) => {
-      const o = opening[p.code] || 0, cl = closingPcs(p.code);
+      const oCBP = openCBP(p.code), o = openPcs(p.code), cl = closingPcs(p.code);
       const ct = counts[p.code];
       const phys = ct ? toPcs(ct.c, ct.b, ct.p, p.pcsCase, p.pcsOuter) : "";
       const cost = skuPricing(p.mrp, config.perSku[p.code] || {}, config.ourMargin).cost;
-      rep.push([p.code, p.desc, p.mrp, cbp(o, p), o, ...MOVES.map((m) => mvPcs(p, m.key)), cbp(cl, p), cl, phys, ct ? phys - cl : "", +(cl * cost).toFixed(2)]);
+      rep.push([p.code, p.desc, p.mrp, cbpStr(oCBP), o, ...MOVES.map((m) => mvPcs(p, m.key)), cbpStr(closingCBP(p.code)), cl, phys, ct ? phys - cl : "", +(cl * cost).toFixed(2)]);
     });
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rep), "Stock Report");
 
@@ -989,7 +1020,7 @@ export default function App() {
     ps.forEach((p) => {
       const cl = closingPcs(p.code), ct = counts[p.code];
       const phys = ct ? toPcs(ct.c, ct.b, ct.p, p.pcsCase, p.pcsOuter) : null;
-      st.push([p.code, p.desc, cbp(cl, p), cl, ct ? `${ct.c}·${ct.b}·${ct.p}` : "not counted", phys ?? "", ct ? phys - cl : "", ct ? (phys - cl) * p.mrp : ""]);
+      st.push([p.code, p.desc, cbpStr(closingCBP(p.code)), cl, ct ? `${ct.c}·${ct.b}·${ct.p}` : "not counted", phys ?? "", ct ? phys - cl : "", ct ? (phys - cl) * p.mrp : ""]);
     });
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(st), "Stock Take");
 
@@ -1239,15 +1270,19 @@ export default function App() {
             const ps = products || [];
             const ql = query.trim().toLowerCase();
             const rowsM = ps.map((p) => {
-              const o = monthly.baseOpen[p.code] || 0;
+              const oCBP = monthly.baseOpen[p.code] || { ...ZERO };
               const s = monthly.sums[p.code] || {};
-              let net = 0;
-              MOVES.forEach((m) => { net += m.sign * (s[m.key] || 0); });
-              return { p, o, s, net, cl: o + net };
-            }).filter((r) => r.o !== 0 || r.net !== 0)
+              // net and closing computed per unit (Case/Box/Pcs), no re-bundling
+              const netCBP = { ...ZERO };
+              MOVES.forEach((m) => { const c = s[m.key]; if (c) { netCBP.c += m.sign * c.c; netCBP.b += m.sign * c.b; netCBP.p += m.sign * c.p; } });
+              const clCBP = { c: oCBP.c + netCBP.c, b: oCBP.b + netCBP.b, p: oCBP.p + netCBP.p };
+              const o = cbpPcs(oCBP, p), net = cbpPcs(netCBP, p), cl = cbpPcs(clCBP, p);
+              const movedAny = MOVES.some((m) => s[m.key] && (s[m.key].c || s[m.key].b || s[m.key].p));
+              return { p, oCBP, s, netCBP, clCBP, o, net, cl, movedAny };
+            }).filter((r) => r.oCBP.c || r.oCBP.b || r.oCBP.p || r.movedAny)
               .filter((r) => mrpMatch(r.p.mrp))
               .filter((r) => !ql || r.p.desc.toLowerCase().includes(ql) || r.p.code.toLowerCase().includes(ql));
-            const tot = (f) => rowsM.reduce((a, r) => a + (r.s[f] || 0), 0);
+            const tot = (f) => rowsM.reduce((a, r) => a + (r.s[f] ? toPcs(r.s[f].c, r.s[f].b, r.s[f].p, r.p.pcsCase, r.p.pcsOuter) : 0), 0);
             return (
               <>
                 <div className="hint" style={{ paddingTop: 6 }}>
@@ -1271,9 +1306,8 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {rowsM.map(({ p, o, s, net, cl }) => {
-                        const cd = fromPcs(cl, p.pcsCase, p.pcsOuter);
-                        const od = fromPcs(o, p.pcsCase, p.pcsOuter);
+                      {rowsM.map(({ p, oCBP, s, net, cl, clCBP }) => {
+                        const cd = clCBP, od = oCBP;
                         const cost = skuPricing(p.mrp, config.perSku[p.code] || {}, config.ourMargin).cost;
                         return (
                           <tr key={p.code} className={cl < 0 ? "rneg" : ""}>
@@ -1281,8 +1315,8 @@ export default function App() {
                             <td className="stick desc">{p.desc}</td>
                             <td className="num dim">{p.mrp}</td>
                             <td className="cbp">{od.c}·{od.b}·{od.p}</td>
-                            <td className="num dim">{o}</td>
-                            {MOVES.map((m) => <td key={m.key} className="num dim">{s[m.key] || ""}</td>)}
+                            <td className="num dim">{cbpPcs(od, p)}</td>
+                            {MOVES.map((m) => { const c = s[m.key]; const t = c ? toPcs(c.c, c.b, c.p, p.pcsCase, p.pcsOuter) : 0; return <td key={m.key} className="num dim">{t || ""}</td>; })}
                             <td className={"num " + (net < 0 ? "negtxt" : net > 0 ? "oktxt" : "dim")}>{net !== 0 ? (net > 0 ? "+" : "") + net : ""}</td>
                             <td className={"cbp closing" + (cl < 0 ? " negtxt" : "")}>{cd.c}·{cd.b}·{cd.p}</td>
                             <td className={"num closing" + (cl < 0 ? " negtxt" : "")}>{cl}</td>
@@ -1519,10 +1553,10 @@ export default function App() {
               </thead>
               <tbody>
                 {rows.map((p) => {
-                  const o = opening[p.code] || 0;
-                  const od = fromPcs(o, p.pcsCase, p.pcsOuter);
+                  const od = openCBP(p.code);
+                  const o = openPcs(p.code);
+                  const cd = closingCBP(p.code);
                   const cl = closingPcs(p.code);
-                  const cd = fromPcs(cl, p.pcsCase, p.pcsOuter);
                   const cell = (moves[p.code] && moves[p.code][activeMove]) || { c: 0, b: 0, p: 0 };
                   const neg = cl < 0;
                   return (
@@ -1604,13 +1638,14 @@ export default function App() {
               </thead>
               <tbody>
                 {rows.map((p) => {
+                  const cd = closingCBP(p.code);
                   const cl = closingPcs(p.code);
-                  const cd = fromPcs(cl, p.pcsCase, p.pcsOuter);
                   const ct = counts[p.code];
                   const phys = ct ? toPcs(ct.c, ct.b, ct.p, p.pcsCase, p.pcsOuter) : null;
                   const d = ct ? phys - cl : null;
                   if (onlyDiff && (d === null || d === 0)) return null;
-                  const dd = ct ? fromPcs(d, p.pcsCase, p.pcsOuter) : null;
+                  // diff per-unit: physical C·B·P minus system closing C·B·P
+                  const dd = ct ? { c: ct.c - cd.c, b: ct.b - cd.b, p: ct.p - cd.p } : null;
                   const cls = d === null ? "" : d === 0 ? "rok" : d < 0 ? "rneg" : "rexc";
                   return (
                     <tr key={p.code} className={cls}>
@@ -1833,9 +1868,10 @@ export default function App() {
               </thead>
               <tbody>
                 {rows.map((p) => {
-                  const o = opening[p.code] || 0;
+                  const od = openCBP(p.code);
+                  const o = openPcs(p.code);
                   const cl = closingPcs(p.code);
-                  const cd = fromPcs(cl, p.pcsCase, p.pcsOuter);
+                  const cd = closingCBP(p.code);
                   const mv = moves[p.code] || {};
                   const ct = counts[p.code];
                   const phys = ct ? toPcs(ct.c, ct.b, ct.p, p.pcsCase, p.pcsOuter) : null;
@@ -1846,7 +1882,7 @@ export default function App() {
                       <td className="stick code mono">{p.code}</td>
                       <td className="stick desc">{p.desc}</td>
                       <td className="num dim">{p.mrp}</td>
-                      <td className="cbp">{fromPcs(o, p.pcsCase, p.pcsOuter).c}·{fromPcs(o, p.pcsCase, p.pcsOuter).b}·{fromPcs(o, p.pcsCase, p.pcsOuter).p}</td>
+                      <td className="cbp">{od.c}·{od.b}·{od.p}</td>
                       <td className="num dim">{o}</td>
                       {MOVES.map((m) => {
                         const c = mv[m.key];
@@ -1869,7 +1905,7 @@ export default function App() {
                   const t = { open: 0, mv: {}, cl: 0, phys: 0, diff: 0, val: 0 };
                   MOVES.forEach((m) => (t.mv[m.key] = 0));
                   rows.forEach((p) => {
-                    const o = opening[p.code] || 0, cl = closingPcs(p.code);
+                    const o = openPcs(p.code), cl = closingPcs(p.code);
                     const cost = skuPricing(p.mrp, config.perSku[p.code] || {}, config.ourMargin).cost;
                     t.open += o; t.cl += cl; t.val += cl * cost;
                     const mv = moves[p.code] || {};
