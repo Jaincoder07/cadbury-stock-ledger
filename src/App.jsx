@@ -785,6 +785,19 @@ export default function App() {
     setSaving(false);
   };
 
+  // ---- shared MRP column filter (Excel-style, used on every product table) ----
+  const [mrpSel, setMrpSel] = useState(null);        // array of MRP strings, or null = all
+  const [openMrpCol, setOpenMrpCol] = useState(null);
+  const mrpValues = useMemo(
+    () => [...new Set((products || []).map((p) => p.mrp))].sort((a, b) => a - b),
+    [products]
+  );
+  const mrpMatch = (mrp) => !mrpSel || mrpSel.includes(String(mrp));
+  const MrpFilterTh = ({ thClass }) => (
+    <FilterTh label="MRP" col="mrp" thClass={thClass || "num"} values={mrpValues}
+      selected={mrpSel} openCol={openMrpCol} setOpenCol={setOpenMrpCol} onApply={setMrpSel} />
+  );
+
   // ---- filtered rows (deferred query keeps typing responsive on large tables) ----
   const deferredQuery = useDeferredValue(query);
   const rows = useMemo(() => {
@@ -792,6 +805,7 @@ export default function App() {
     const q = deferredQuery.trim().toLowerCase();
     return products.filter((p) => {
       if (q && !(p.desc.toLowerCase().includes(q) || p.code.toLowerCase().includes(q))) return false;
+      if (mrpSel && !mrpSel.includes(String(p.mrp))) return false;
       if (!showZero && tab !== "config") {
         const hasMv = moves[p.code] && Object.values(moves[p.code]).some((c) => c && (c.c || c.b || c.p));
         const o = opening[p.code] || 0;
@@ -799,7 +813,7 @@ export default function App() {
       }
       return true;
     });
-  }, [products, deferredQuery, showZero, moves, opening, tab]);
+  }, [products, deferredQuery, showZero, moves, opening, tab, mrpSel]);
 
   // ---- day totals ----
   const totals = useMemo(() => {
@@ -1231,6 +1245,7 @@ export default function App() {
               MOVES.forEach((m) => { net += m.sign * (s[m.key] || 0); });
               return { p, o, s, net, cl: o + net };
             }).filter((r) => r.o !== 0 || r.net !== 0)
+              .filter((r) => mrpMatch(r.p.mrp))
               .filter((r) => !ql || r.p.desc.toLowerCase().includes(ql) || r.p.code.toLowerCase().includes(ql));
             const tot = (f) => rowsM.reduce((a, r) => a + (r.s[f] || 0), 0);
             return (
@@ -1238,12 +1253,14 @@ export default function App() {
                 <div className="hint" style={{ paddingTop: 6 }}>
                   Opening as on {monthly.baseDate ? fmtDate(monthly.baseDate) : "—"} · {monthly.days} day(s) with saved entries this month · showing products with stock or movement.
                 </div>
-                <div className="gridwrap">
+                <div className="gridwrap" style={openMrpCol ? { minHeight: 460 } : undefined}>
+                  {openMrpCol && <div className="hfback" onClick={() => setOpenMrpCol(null)} />}
                   <table className="grid">
                     <thead>
                       <tr>
                         <th className="stick code">Code</th>
                         <th className="stick desc">Product</th>
+                        <MrpFilterTh />
                         <th className="grp">Opening<br /><span>C · B · P</span></th>
                         <th className="num">Opening Pcs</th>
                         {MOVES.map((m) => <th key={m.key} className="num" style={{ color: m.color }}>{m.label}</th>)}
@@ -1262,6 +1279,7 @@ export default function App() {
                           <tr key={p.code} className={cl < 0 ? "rneg" : ""}>
                             <td className="stick code mono">{p.code}</td>
                             <td className="stick desc">{p.desc}</td>
+                            <td className="num dim">{p.mrp}</td>
                             <td className="cbp">{od.c}·{od.b}·{od.p}</td>
                             <td className="num dim">{o}</td>
                             {MOVES.map((m) => <td key={m.key} className="num dim">{s[m.key] || ""}</td>)}
@@ -1284,6 +1302,7 @@ export default function App() {
                           <tr className="trow">
                             <td className="stick code">TOTAL</td>
                             <td className="stick desc">{rowsM.length} products</td>
+                            <td></td>
                             <td></td>
                             <td className="num">{t.open}</td>
                             {MOVES.map((m) => <td key={m.key} className="num" style={{ color: m.color }}>{tot(m.key) || ""}</td>)}
@@ -1351,7 +1370,7 @@ export default function App() {
                 costR: q.r * pr.cost, costW: q.w * pr.cost,
                 profR: q.r * pr.profitR, profW: q.w * pr.profitW,
               };
-            }).filter(Boolean).filter((r) => {
+            }).filter(Boolean).filter((r) => mrpMatch(r.p.mrp)).filter((r) => {
               const ql = query.trim().toLowerCase();
               return !ql || r.p.desc.toLowerCase().includes(ql) || r.p.code.toLowerCase().includes(ql);
             });
@@ -1378,13 +1397,14 @@ export default function App() {
                   Sales Value, Cost Value and Profit are all <b>ex-GST</b> (Sales − Cost = Profit exactly). Rate columns show the billing rate incl GST.
                   Edit/Cancel and Retail Extra are not counted. Showing only items sold.
                 </div>
-                <div className="gridwrap">
+                <div className="gridwrap" style={openMrpCol ? { minHeight: 460 } : undefined}>
+                  {openMrpCol && <div className="hfback" onClick={() => setOpenMrpCol(null)} />}
                   <table className="grid">
                     <thead>
                       <tr>
                         <th className="stick code">Code</th>
                         <th className="stick desc">Product</th>
-                        <th className="num">MRP</th>
+                        <MrpFilterTh />
                         <th className="num" style={{ color: "#b3261e" }}>Retail Qty</th>
                         <th className="num">Rate</th>
                         <th className="num">Sales Value</th>
@@ -1478,13 +1498,14 @@ export default function App() {
                 Closing carries to tomorrow's opening automatically. Switch movement type with the colored buttons.</>}
           </div>
 
-          <div className="gridwrap">
+          <div className="gridwrap" style={openMrpCol ? { minHeight: 460 } : undefined}>
+            {openMrpCol && <div className="hfback" onClick={() => setOpenMrpCol(null)} />}
             <table className="grid">
               <thead>
                 <tr>
                   <th className="stick code">Code</th>
                   <th className="stick desc">Product</th>
-                  <th className="num">MRP</th>
+                  <MrpFilterTh />
                   <th className="grp">Opening<br /><span>C · B · P</span></th>
                   <th className="num">Open<br /><span>Pcs</span></th>
                   <th className="grp" style={{ color: activeMv.color }}>{activeMv.label}<br /><span>Case</span></th>
@@ -1561,12 +1582,14 @@ export default function App() {
             (closing includes all of today's In/Out/Wholesale/Retail/Edit). Untouched rows are treated as <b>not counted</b> — use ⟲ to un-count a row.
           </div>
 
-          <div className="gridwrap">
+          <div className="gridwrap" style={openMrpCol ? { minHeight: 460 } : undefined}>
+            {openMrpCol && <div className="hfback" onClick={() => setOpenMrpCol(null)} />}
             <table className="grid">
               <thead>
                 <tr>
                   <th className="stick code">Code</th>
                   <th className="stick desc">Product</th>
+                  <MrpFilterTh />
                   <th className="grp closing">System Closing<br /><span>C · B · P</span></th>
                   <th className="num closing">Pcs</th>
                   <th className="grp" style={{ color: "#0a6e7a" }}>Physical<br /><span>Case</span></th>
@@ -1593,6 +1616,7 @@ export default function App() {
                     <tr key={p.code} className={cls}>
                       <td className="stick code mono">{p.code}</td>
                       <td className="stick desc">{p.desc}</td>
+                      <td className="num dim">{p.mrp}</td>
                       <td className="cbp closing">{cd.c}·{cd.b}·{cd.p}</td>
                       <td className="num closing">{cl}</td>
                       <td className="inp"><NumCell value={ct ? ct.c : 0} accent="#0a6e7a" onChange={(v) => setCount(p.code, "c", v)} /></td>
@@ -1789,13 +1813,14 @@ export default function App() {
             <div className="rcard"><div className="rl">Warehouse</div><div className="rv sm">{wh}</div></div>
             <div className="rcard"><div className="rl">As on</div><div className="rv sm">{fmtDate(date)}</div></div>
           </div>
-          <div className="gridwrap">
+          <div className="gridwrap" style={openMrpCol ? { minHeight: 460 } : undefined}>
+            {openMrpCol && <div className="hfback" onClick={() => setOpenMrpCol(null)} />}
             <table className="grid">
               <thead>
                 <tr>
                   <th className="stick code">Code</th>
                   <th className="stick desc">Product</th>
-                  <th className="num">MRP</th>
+                  <MrpFilterTh />
                   <th className="grp">Opening<br /><span>C · B · P</span></th>
                   <th className="num">Open<br /><span>Pcs</span></th>
                   {MOVES.map((m) => <th key={m.key} className="num" style={{ color: m.color }}>{m.label}</th>)}
