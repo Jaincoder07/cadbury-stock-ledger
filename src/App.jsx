@@ -96,6 +96,8 @@ const skuPricing = (mrp, cfg, ourMargin) => {
 const mvKey = (wh, date) => `cad:mv:${wh}:${date}`;       // movements for a warehouse-day
 const openKey = (wh, date) => `cad:open:${wh}:${date}`;   // opening snapshot (carry)
 const countKey = (wh, date) => `cad:count:${wh}:${date}`; // physical stock-take counts
+const remarkKey = (wh, date) => `cad:remark:${wh}:${date}`; // stock-take remarks (code -> text)
+const lockKey = (wh, date) => `cad:lock:${wh}:${date}`;   // day locked after Save Day
 
 // storage lives in Supabase (src/storage.js) — shared across all devices/users.
 
@@ -520,7 +522,7 @@ function AddProductPanel({ products, onAdd, onClose }) {
 }
 
 // ---------- tiny numeric cell ----------
-function NumCell({ value, onChange, accent }) {
+function NumCell({ value, onChange, accent, disabled }) {
   const [v, setV] = useState(value === 0 || value == null ? "" : String(value));
   useEffect(() => { setV(value === 0 || value == null ? "" : String(value)); }, [value]);
   return (
@@ -528,6 +530,7 @@ function NumCell({ value, onChange, accent }) {
       className="ncell"
       inputMode="numeric"
       value={v}
+      disabled={disabled}
       style={accent ? { color: accent } : undefined}
       onChange={(e) => {
         const raw = e.target.value.replace(/[^0-9\-]/g, "");
@@ -572,7 +575,9 @@ export default function App() {
 
   // ---- physical stock take (per warehouse-day, auto-saved) ----
   const [counts, setCounts] = useState({});          // code -> {c,b,p}; row present = counted (loaded in loadDay)
+  const [remarks, setRemarks] = useState({});        // code -> remark text
   const [onlyDiff, setOnlyDiff] = useState(false);
+  const [locked, setLocked] = useState(false);       // day locked after Save Day
   const setCount = (code, dim, val) => {
     setCounts((prev) => {
       const next = { ...prev, [code]: { ...(prev[code] || { c: 0, b: 0, p: 0 }), [dim]: val } };
@@ -585,6 +590,14 @@ export default function App() {
       const next = { ...prev };
       delete next[code];
       kvSetBg(countKey(wh, date), next);
+      return next;
+    });
+  };
+  const setRemark = (code, text) => {
+    setRemarks((prev) => {
+      const next = { ...prev };
+      if (text) next[code] = text; else delete next[code];
+      kvSetBg(remarkKey(wh, date), next);
       return next;
     });
   };
@@ -673,6 +686,8 @@ export default function App() {
   const myEmail = session?.user?.email?.toLowerCase() || null;
   const isAdmin = profile?.role === "admin";
   const signOut = () => supabase.auth.signOut();
+  // once a day is saved it locks and no one edits it; only an admin can reopen it
+  const canEdit = !locked;
 
   // ---- load products + warehouses + config + users after login ----
   useEffect(() => {
@@ -740,12 +755,14 @@ export default function App() {
     if (!prods) return;
     try {
       const [m, open] = await Promise.all([
-        kvGetMany([mvKey(whName, d), countKey(whName, d)]),
+        kvGetMany([mvKey(whName, d), countKey(whName, d), remarkKey(whName, d), lockKey(whName, d)]),
         resolveOpening(whName, d, prods),
       ]);
       setOpening(open);
       setMoves(m[mvKey(whName, d)] || {});
       setCounts(m[countKey(whName, d)] || {});
+      setRemarks(m[remarkKey(whName, d)] || {});
+      setLocked(!!m[lockKey(whName, d)]);
       setDbError(null);
     } catch (e) {
       setDbError(e.message || String(e));
@@ -803,11 +820,33 @@ export default function App() {
   const save = async () => {
     setSaving(true);
     try {
-      await kvSet(mvKey(wh, date), moves);
+      // persist movements, counts and remarks, then lock the day
+      await Promise.all([
+        kvSet(mvKey(wh, date), moves),
+        kvSet(countKey(wh, date), counts),
+        kvSet(remarkKey(wh, date), remarks),
+        kvSet(lockKey(wh, date), { by: myEmail, at: new Date().toISOString() }),
+      ]);
+      setLocked(true);
       setSavedAt(new Date());
       setDbError(null);
     } catch (e) {
       setDbError("Save failed: " + (e.message || e));
+    }
+    setSaving(false);
+  };
+
+  // ---- admin: reopen a locked day for editing ----
+  const reopenDay = async () => {
+    if (!window.confirm(`Reopen ${fmtDate(date)} for ${wh}? Staff will be able to edit this day again.`)) return;
+    setSaving(true);
+    try {
+      await kvDeleteMany([lockKey(wh, date)]);
+      setLocked(false);
+      setSavedAt(null);
+      setDbError(null);
+    } catch (e) {
+      setDbError("Reopen failed: " + (e.message || e));
     }
     setSaving(false);
   };
@@ -1016,11 +1055,11 @@ export default function App() {
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(ent), "Daily Entry");
 
     // Stock Take
-    const st = [["Code", "Product", "System C·B·P", "System Pcs", "Physical C·B·P", "Physical Pcs", "Diff Pcs", "Diff Value (MRP)"]];
+    const st = [["Code", "Product", "System C·B·P", "System Pcs", "Physical C·B·P", "Physical Pcs", "Diff Pcs", "Diff Value (MRP)", "Remarks"]];
     ps.forEach((p) => {
       const cl = closingPcs(p.code), ct = counts[p.code];
       const phys = ct ? toPcs(ct.c, ct.b, ct.p, p.pcsCase, p.pcsOuter) : null;
-      st.push([p.code, p.desc, cbpStr(closingCBP(p.code)), cl, ct ? `${ct.c}·${ct.b}·${ct.p}` : "not counted", phys ?? "", ct ? phys - cl : "", ct ? (phys - cl) * p.mrp : ""]);
+      st.push([p.code, p.desc, cbpStr(closingCBP(p.code)), cl, ct ? `${ct.c}·${ct.b}·${ct.p}` : "not counted", phys ?? "", ct ? phys - cl : "", ct ? (phys - cl) * p.mrp : "", remarks[p.code] || ""]);
     });
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(st), "Stock Take");
 
@@ -1172,14 +1211,16 @@ export default function App() {
         {isAdmin && <button className={tab === "users" ? "tab on" : "tab"} onClick={() => setTab("users")}>Users</button>}
         <div className="spacer" />
         <button className="ghost2" style={{ marginRight: 8 }} onClick={exportAll} title="Download all tabs as one Excel file">⬇ Export</button>
-        {!["config", "stocktake", "users", "dashboard", "monthly", "pl"].includes(tab) && (
+        {(tab === "entry" || tab === "stocktake") && (
           <div className="savebox">
-            {savedAt && <span className="saved">✓ saved {savedAt.toLocaleTimeString()}</span>}
-            {!savedAt && <span className="unsaved">unsaved changes</span>}
-            <button className="save" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save Day"}</button>
+            {locked
+              ? <span className="lockpill" title={`Locked for ${fmtDate(date)}`}>🔒 Day locked</span>
+              : (savedAt ? <span className="saved">✓ saved {savedAt.toLocaleTimeString()}</span> : <span className="unsaved">unsaved changes</span>)}
+            {locked && isAdmin && <button className="ghost2" onClick={reopenDay} disabled={saving}>Reopen day</button>}
+            {!locked && <button className="save" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save Day"}</button>}
           </div>
         )}
-        {(tab === "config" || tab === "stocktake") && <span className="saved" style={{ padding: "8px 0" }}>changes save automatically</span>}
+        {tab === "config" && <span className="saved" style={{ padding: "8px 0" }}>changes save automatically</span>}
       </div>
 
       {/* ===== dashboard ===== */}
@@ -1566,9 +1607,9 @@ export default function App() {
                       <td className="num dim">{p.mrp}</td>
                       <td className="cbp">{od.c}·{od.b}·{od.p}</td>
                       <td className="num dim">{o}</td>
-                      <td className="inp"><NumCell value={cell.c} accent={activeMv.color} onChange={(v) => setCell(p.code, activeMove, "c", v)} /></td>
-                      <td className="inp"><NumCell value={cell.b} accent={activeMv.color} onChange={(v) => setCell(p.code, activeMove, "b", v)} /></td>
-                      <td className="inp"><NumCell value={cell.p} accent={activeMv.color} onChange={(v) => setCell(p.code, activeMove, "p", v)} /></td>
+                      <td className="inp"><NumCell value={cell.c} accent={activeMv.color} disabled={!canEdit} onChange={(v) => setCell(p.code, activeMove, "c", v)} /></td>
+                      <td className="inp"><NumCell value={cell.b} accent={activeMv.color} disabled={!canEdit} onChange={(v) => setCell(p.code, activeMove, "b", v)} /></td>
+                      <td className="inp"><NumCell value={cell.p} accent={activeMv.color} disabled={!canEdit} onChange={(v) => setCell(p.code, activeMove, "p", v)} /></td>
                       <td className="num" style={{ color: activeMv.color, fontWeight: 600 }}>{toPcs(cell.c, cell.b, cell.p, p.pcsCase, p.pcsOuter) || ""}</td>
                       <td className={"cbp closing" + (neg ? " negtxt" : "")}>{cd.c}·{cd.b}·{cd.p}</td>
                       <td className={"num closing" + (neg ? " negtxt" : "")}>{cl}</td>
@@ -1633,6 +1674,7 @@ export default function App() {
                   <th className="num">Diff Pcs</th>
                   <th className="grp">Diff<br /><span>C · B · P</span></th>
                   <th className="num">Diff ₹</th>
+                  <th className="rmkhead">Remarks</th>
                   <th></th>
                 </tr>
               </thead>
@@ -1654,16 +1696,22 @@ export default function App() {
                       <td className="num dim">{p.mrp}</td>
                       <td className="cbp closing">{cd.c}·{cd.b}·{cd.p}</td>
                       <td className="num closing">{cl}</td>
-                      <td className="inp"><NumCell value={ct ? ct.c : 0} accent="#0a6e7a" onChange={(v) => setCount(p.code, "c", v)} /></td>
-                      <td className="inp"><NumCell value={ct ? ct.b : 0} accent="#0a6e7a" onChange={(v) => setCount(p.code, "b", v)} /></td>
-                      <td className="inp"><NumCell value={ct ? ct.p : 0} accent="#0a6e7a" onChange={(v) => setCount(p.code, "p", v)} /></td>
+                      <td className="inp"><NumCell value={ct ? ct.c : 0} accent="#0a6e7a" disabled={!canEdit} onChange={(v) => setCount(p.code, "c", v)} /></td>
+                      <td className="inp"><NumCell value={ct ? ct.b : 0} accent="#0a6e7a" disabled={!canEdit} onChange={(v) => setCount(p.code, "b", v)} /></td>
+                      <td className="inp"><NumCell value={ct ? ct.p : 0} accent="#0a6e7a" disabled={!canEdit} onChange={(v) => setCount(p.code, "p", v)} /></td>
                       <td className="num">{ct ? phys : "–"}</td>
                       <td className={"num " + (d === null ? "dim" : d < 0 ? "negtxt" : d > 0 ? "exctxt" : "oktxt")}>
                         {d === null ? "not counted" : d === 0 ? "✓ 0" : (d > 0 ? "+" : "") + d}
                       </td>
                       <td className="cbp">{ct && d !== 0 ? `${dd.c}·${dd.b}·${dd.p}` : ""}</td>
                       <td className={"num " + (d ? (d < 0 ? "negtxt" : "exctxt") : "dim")}>{ct && d !== 0 ? inr(d * p.mrp) : ""}</td>
-                      <td className="inp">{ct && <button className="unct" title="Clear count (mark not counted)" onClick={() => clearCount(p.code)}>⟲</button>}</td>
+                      <td className="rmkcell">
+                        <textarea className="rmk" rows={1} value={remarks[p.code] || ""} disabled={!canEdit}
+                          placeholder={canEdit ? "reason…" : ""}
+                          onChange={(e) => { setRemark(p.code, e.target.value); e.target.style.height = "auto"; e.target.style.height = e.target.scrollHeight + "px"; }}
+                          ref={(el) => { if (el) { el.style.height = "auto"; el.style.height = el.scrollHeight + "px"; } }} />
+                      </td>
+                      <td className="inp">{ct && canEdit && <button className="unct" title="Clear count (mark not counted)" onClick={() => clearCount(p.code)}>⟲</button>}</td>
                     </tr>
                   );
                 })}
@@ -2001,6 +2049,13 @@ const CSS = `
 .inp { padding:1px 3px; text-align:center; }
 .ncell { width:48px; border:1px solid #e0d4bf; border-radius:4px; padding:3px 4px; text-align:center; font-size:12.5px; background:#fffdf8; font-variant-numeric:tabular-nums; }
 .ncell:focus { outline:none; border-color:#6b1f24; background:#fff; box-shadow:0 0 0 2px rgba(107,31,36,.12); }
+.ncell:disabled { background:#f0ece3; color:#9a8a72; cursor:not-allowed; }
+.rmkhead { text-align:left; min-width:160px; }
+.rmkcell { padding:2px 6px; min-width:160px; max-width:220px; }
+.rmk { width:100%; min-width:150px; border:1px solid #e0d4bf; border-radius:5px; padding:4px 6px; font:inherit; font-size:12px; background:#fffdf8; resize:none; overflow:hidden; line-height:1.35; }
+.rmk:focus { outline:none; border-color:#6b1f24; background:#fff; box-shadow:0 0 0 2px rgba(107,31,36,.12); }
+.rmk:disabled { background:#f0ece3; color:#5b4a3a; cursor:default; border-color:#e7dccb; }
+.lockpill { color:#8a5a00; font-size:12px; font-weight:700; }
 .dberr { background:#b3261e; color:#fff; padding:9px 18px; font-size:13px; font-weight:600; display:flex; align-items:center; }
 .dberr .ghost2 { color:#fff; border-color:rgba(255,255,255,.5); }
 .addpanel { margin:0 18px 10px; padding:12px 14px; background:#fff; border:1.5px solid #6b1f24; border-radius:9px; }
