@@ -791,7 +791,8 @@ export default function App() {
     return cbpPcs(openCBP(code), pr);
   }, [openCBP, prodByCode]);
 
-  // ---- update a single cell ----
+  // ---- update a single cell (auto-saved immediately, so nothing is lost on
+  // reload / minimize / date switch; Save Day then just locks the day) ----
   const setCell = (code, moveKey, dim, val) => {
     setMoves((prev) => {
       const next = { ...prev };
@@ -800,9 +801,10 @@ export default function App() {
       cell[dim] = val;
       row[moveKey] = cell;
       next[code] = row;
+      kvSetBg(mvKey(wh, date), next);
       return next;
     });
-    setSavedAt(null);
+    setSavedAt(new Date());
   };
 
   // delete stale opening snapshots after a given date so they get recomputed
@@ -1215,9 +1217,9 @@ export default function App() {
           <div className="savebox">
             {locked
               ? <span className="lockpill" title={`Locked for ${fmtDate(date)}`}>🔒 Day locked</span>
-              : (savedAt ? <span className="saved">✓ saved {savedAt.toLocaleTimeString()}</span> : <span className="unsaved">unsaved changes</span>)}
+              : <span className="saved">✓ auto-saved</span>}
             {locked && isAdmin && <button className="ghost2" onClick={reopenDay} disabled={saving}>Reopen day</button>}
-            {!locked && <button className="save" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save Day"}</button>}
+            {!locked && <button className="save" onClick={save} disabled={saving} title="Lock this day so it can't be edited">{saving ? "Saving…" : "Save & Lock Day"}</button>}
           </div>
         )}
         {tab === "config" && <span className="saved" style={{ padding: "8px 0" }}>changes save automatically</span>}
