@@ -1019,12 +1019,16 @@ export default function App() {
       Object.entries(cfgUpdates).forEach(([code, c]) => { perSku[code] = { ...(perSku[code] || {}), ...c }; });
       saveConfig({ ...config, perSku });
     }
-    await kvSet(openKey(wh, asOn), openMap);
+    // MERGE into any existing opening snapshot for that date — so products in the
+    // sheet are updated/added, and products NOT in the sheet keep their opening
+    const existing = (await kvGetMany([openKey(wh, asOn)]))[openKey(wh, asOn)] || {};
+    const merged = { ...existing, ...openMap };
+    await kvSet(openKey(wh, asOn), merged);
     // a fresh opening invalidates every later stamped opening for this warehouse
     await invalidateAfter(wh, asOn);
-    if (asOn === date) { setOpening(openMap); }
+    if (asOn === date) { setOpening(merged); }
     else loadDay(wh, date, next);
-    alert(`${wh}: ${newProds.length} products created, opening stock set as on ${fmtDate(asOn)} for ${Object.keys(openMap).length} products.`);
+    alert(`${wh}: ${newProds.length} new product(s) added, ${Object.keys(updates).length} updated, opening set as on ${fmtDate(asOn)} for ${Object.keys(openMap).length} product(s).`);
   };
 
   // ---- export all tabs to one Excel workbook ----
