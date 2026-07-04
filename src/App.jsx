@@ -665,6 +665,25 @@ export default function App() {
     if (np.openCase || np.openBox || np.openPcs)
       setOpening((prev) => ({ ...prev, [np.code]: { c: np.openCase || 0, b: np.openBox || 0, p: np.openPcs || 0 } }));
   };
+  // ---- delete a product from this warehouse's master (admin only) ----
+  const deleteProduct = (p) => {
+    if (!isAdmin) return;
+    if (!window.confirm(`Delete "${p.desc}" (${p.code}) from ${wh}? This removes it from the product list and its pricing. Past saved movements keep their record but the item won't appear going forward.`)) return;
+    setProducts((prev) => {
+      const next = prev.filter((x) => x.code !== p.code);
+      kvSetBg(prodKey(wh), next);
+      return next;
+    });
+    // drop its pricing overrides
+    if (config.perSku[p.code]) {
+      const perSku = { ...config.perSku };
+      delete perSku[p.code];
+      saveConfig({ ...config, perSku });
+    }
+    // drop from currently loaded day's opening view
+    setOpening((prev) => { const n = { ...prev }; delete n[p.code]; return n; });
+    if (editRow === p.code) setEditRow(null);
+  };
 
   const [dbError, setDbError] = useState(null);
   const dateRef = useRef(null);
@@ -1863,10 +1882,13 @@ export default function App() {
                       <td className="num dim">{(pr.cost * p.pcsCase).toFixed(2)}</td>
                       <td className={"num closing " + (pr.profitR < 0 ? "negtxt" : "oktxt")}>{pr.profitR.toFixed(2)}</td>
                       <td className={"num closing " + (pr.profitW < 0 ? "negtxt" : "oktxt")}>{pr.profitW.toFixed(2)}</td>
-                      <td className="inp">
+                      <td className="inp" style={{ whiteSpace: "nowrap" }}>
                         <button className={editing ? "unct edon" : "unct"} onClick={() => (editing ? setEditRow(null) : startEdit(p))}>
                           {editing ? "✓ Done" : "✎ Edit"}
                         </button>
+                        {isAdmin && editing && (
+                          <button className="unct del" style={{ marginLeft: 6 }} onClick={() => deleteProduct(p)}>🗑 Delete</button>
+                        )}
                       </td>
                     </tr>
                   );
@@ -2075,6 +2097,8 @@ const CSS = `
 .apauto { display:inline-block; padding:7px 9px; font-size:13px; font-weight:700; color:#1b6b40; background:#f0f7f0; border:1px dashed #9cc0a5; border-radius:6px; min-width:50px; text-align:center; }
 .redit td { background:#fdf9ee !important; }
 .unct.edon { background:#1b7f4d; border-color:#1b7f4d; color:#fff; font-weight:700; }
+.unct.del { color:#b3261e; border-color:#e0a3a3; }
+.unct.del:hover { background:#fdecec; }
 .aperr { margin-top:8px; font-size:12px; color:#b3261e; font-weight:600; }
 .apwarn { margin-top:8px; font-size:12px; color:#8a5a00; font-weight:600; }
 .loginbox { background:#fff; border:1px solid #d2c2a8; border-radius:12px; padding:30px 34px; width:340px; box-shadow:0 4px 24px rgba(42,32,24,.08); }
