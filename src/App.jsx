@@ -67,6 +67,17 @@ const computeClosing = (openCBP, mv) => {
   });
   return { c, b, p };
 };
+// minimum borrow: if pcs run short, break just enough boxes into pcs; if boxes then
+// run short, break just enough cases into boxes. Never compresses positives upward,
+// and never changes the total piece count.
+const borrow = (cbp, pr) => {
+  let c = cbp.c || 0, b = cbp.b || 0, p = cbp.p || 0;
+  const po = pr && pr.pcsOuter > 0 ? pr.pcsOuter : 0;
+  const bpc = po > 0 && pr.pcsCase > 0 ? Math.round(pr.pcsCase / po) : 0;
+  if (p < 0 && po > 0) { const k = Math.ceil(-p / po); p += k * po; b -= k; }
+  if (b < 0 && bpc > 0) { const k = Math.ceil(-b / bpc); b += k * bpc; c -= k; }
+  return { c, b, p };
+};
 
 // storage keys
 const prodKey = (wh) => `cad:products:${wh}`;             // product master — separate per warehouse
@@ -794,17 +805,17 @@ export default function App() {
     const m = {}; (products || []).forEach((p) => (m[p.code] = p)); return m;
   }, [products]);
 
-  // ---- closing per product (raw C·B·P, component-wise) ----
+  // ---- closing per product (C·B·P, component-wise, with minimum borrow for display) ----
   const closingCBP = useCallback((code) => {
-    return computeClosing(opening[code] || { ...ZERO }, moves[code]);
-  }, [opening, moves]);
-  // total pcs of closing (for valuation / negative checks)
+    return borrow(computeClosing(opening[code] || { ...ZERO }, moves[code]), prodByCode[code]);
+  }, [opening, moves, prodByCode]);
+  // total pcs of closing (for valuation / negative checks) — borrow keeps the total identical
   const closingPcs = useCallback((code) => {
     const pr = prodByCode[code]; if (!pr) return 0;
     return cbpPcs(closingCBP(code), pr);
   }, [closingCBP, prodByCode]);
-  // opening as raw C·B·P and its total pcs
-  const openCBP = useCallback((code) => opening[code] || { ...ZERO }, [opening]);
+  // opening as C·B·P (borrowed for display) and its total pcs
+  const openCBP = useCallback((code) => borrow(opening[code] || { ...ZERO }, prodByCode[code]), [opening, prodByCode]);
   const openPcs = useCallback((code) => {
     const pr = prodByCode[code]; if (!pr) return 0;
     return cbpPcs(openCBP(code), pr);
@@ -1373,7 +1384,7 @@ export default function App() {
                     </thead>
                     <tbody>
                       {rowsM.map(({ p, oCBP, s, net, cl, clCBP }) => {
-                        const cd = clCBP, od = oCBP;
+                        const cd = borrow(clCBP, p), od = borrow(oCBP, p);
                         const cost = skuPricing(p.mrp, config.perSku[p.code] || {}, config.ourMargin).cost;
                         return (
                           <tr key={p.code} className={cl < 0 ? "rneg" : ""}>
