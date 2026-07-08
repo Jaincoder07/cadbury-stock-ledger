@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useMemo, useCallback, useDeferredValue, useRef } from "react";
 import { supabase, kvGetMany, kvSet, kvSetBg, kvGetLike, kvGetRange, kvUpsertMany, kvDeleteMany, onStorageError } from "./storage";
 import * as XLSX from "xlsx";
+import { jsPDF } from "jspdf";
+import autoTable from "jspdf-autotable";
 
 
 const WAREHOUSES_DEFAULT = ["Main Warehouse"];
@@ -109,6 +111,7 @@ const openKey = (wh, date) => `cad:open:${wh}:${date}`;   // opening snapshot (c
 const countKey = (wh, date) => `cad:count:${wh}:${date}`; // physical stock-take counts
 const remarkKey = (wh, date) => `cad:remark:${wh}:${date}`; // stock-take remarks (code -> text)
 const lockKey = (wh, date) => `cad:lock:${wh}:${date}`;   // day locked after Save Day
+const reportKey = (wh, date) => `cad:report:${wh}:${date}`; // daily PDF report generated flag
 
 // storage lives in Supabase (src/storage.js) — shared across all devices/users.
 
@@ -622,6 +625,10 @@ export default function App() {
   const [remarks, setRemarks] = useState({});        // code -> remark text
   const [onlyDiff, setOnlyDiff] = useState(false);
   const [locked, setLocked] = useState(false);       // day locked after Save Day
+  const [reported, setReported] = useState(false);   // daily PDF generated for this day
+  const [prevBlocked, setPrevBlocked] = useState(false); // previous day locked but report not generated
+  const [prevDate, setPrevDate] = useState("");
+  const [promptReport, setPromptReport] = useState(false); // show "generate report" nudge after save
   const setCount = (code, dim, val) => {
     setCounts((prev) => {
       const next = { ...prev, [code]: { ...(prev[code] || { c: 0, b: 0, p: 0 }), [dim]: val } };
@@ -749,8 +756,9 @@ export default function App() {
   const myEmail = session?.user?.email?.toLowerCase() || null;
   const isAdmin = profile?.role === "admin";
   const signOut = () => supabase.auth.signOut();
-  // once a day is saved it locks and no one edits it; only an admin can reopen it
-  const canEdit = !locked;
+  // once a day is saved it locks and no one edits it; only an admin can reopen it.
+  // also blocked if the previous day was locked but its report hasn't been generated.
+  const canEdit = !locked && !prevBlocked;
 
   // ---- load products + warehouses + config + users after login ----
   useEffect(() => {
@@ -817,8 +825,10 @@ export default function App() {
   const loadDay = useCallback(async (whName, d, prods) => {
     if (!prods) return;
     try {
+      const prev = addDays(d, -1);
       const [m, open] = await Promise.all([
-        kvGetMany([mvKey(whName, d), countKey(whName, d), remarkKey(whName, d), lockKey(whName, d)]),
+        kvGetMany([mvKey(whName, d), countKey(whName, d), remarkKey(whName, d), lockKey(whName, d),
+                   reportKey(whName, d), lockKey(whName, prev), reportKey(whName, prev)]),
         resolveOpening(whName, d, prods),
       ]);
       setOpening(open);
@@ -826,6 +836,11 @@ export default function App() {
       setCounts(m[countKey(whName, d)] || {});
       setRemarks(m[remarkKey(whName, d)] || {});
       setLocked(!!m[lockKey(whName, d)]);
+      setReported(!!m[reportKey(whName, d)]);
+      // previous day is a blocker if it was locked (worked on) but its report wasn't generated
+      setPrevBlocked(!!m[lockKey(whName, prev)] && !m[reportKey(whName, prev)]);
+      setPrevDate(prev);
+      setPromptReport(false);
       setDbError(null);
     } catch (e) {
       setDbError(e.message || String(e));
@@ -894,6 +909,7 @@ export default function App() {
       ]);
       setLocked(true);
       setSavedAt(new Date());
+      setPromptReport(true);   // nudge the user to generate the daily PDF
       setDbError(null);
     } catch (e) {
       setDbError("Save failed: " + (e.message || e));
@@ -906,8 +922,10 @@ export default function App() {
     if (!window.confirm(`Reopen ${fmtDate(date)} for ${wh}? Staff will be able to edit this day again.`)) return;
     setSaving(true);
     try {
-      await kvDeleteMany([lockKey(wh, date)]);
+      // reopening invalidates the day's report — clear it so it must be regenerated
+      await kvDeleteMany([lockKey(wh, date), reportKey(wh, date)]);
       setLocked(false);
+      setReported(false);
       setSavedAt(null);
       setDbError(null);
     } catch (e) {
@@ -1146,6 +1164,116 @@ export default function App() {
     XLSX.writeFile(wb, `StockLedger_${wh.replace(/[^\w]+/g, "_")}_${date}.xlsx`);
   };
 
+  // ---- daily PDF report: stock report + stock take in one landscape file ----
+  const [genning, setGenning] = useState(false);
+  const generateReport = async () => {
+    setGenning(true);
+    try {
+      const ps = products || [];
+      const cbpStr = (x) => `${x.c}·${x.b}·${x.p}`;
+      const mvP = (p, key) => { const c = (moves[p.code] || {})[key]; return c ? toPcs(c.c, c.b, c.p, p.pcsCase, p.pcsOuter) : 0; };
+      const inrp = (n) => "Rs " + Math.round(n).toLocaleString("en-IN");
+
+      const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+      const W = doc.internal.pageSize.getWidth();
+      const title = (sub) => {
+        doc.setFont("helvetica", "bold"); doc.setFontSize(15); doc.setTextColor(107, 31, 36);
+        doc.text("ANCHOR", 14, 14);
+        doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(90, 74, 58);
+        doc.text(`Kwality Ventures · Mondelez Distribution`, 14, 19.5);
+        doc.setFont("helvetica", "bold"); doc.setFontSize(11); doc.setTextColor(42, 32, 24);
+        doc.text(sub, W - 14, 14, { align: "right" });
+        doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(90, 74, 58);
+        doc.text(`${wh}  ·  ${fmtDate(date)}`, W - 14, 19.5, { align: "right" });
+      };
+
+      // ---- Stock Report ----
+      title("Daily Stock Report");
+      const repRows = [], t = { open: 0, in: 0, out: 0, whole: 0, retail: 0, edit: 0, cl: 0, val: 0 };
+      ps.forEach((p) => {
+        const oc = openCBP(p.code), op = openPcs(p.code);
+        const cc = closingCBP(p.code), cp = closingPcs(p.code);
+        const anyMv = MOVES.some((m) => mvP(p, m.key));
+        if (op === 0 && cp === 0 && !anyMv) return;
+        const cost = skuPricing(p.mrp, config.perSku[p.code] || {}, config.ourMargin).cost;
+        t.open += op; t.in += mvP(p, "in"); t.out += mvP(p, "out"); t.whole += mvP(p, "whole");
+        t.retail += mvP(p, "retail"); t.edit += mvP(p, "edit"); t.cl += cp; t.val += cp * cost;
+        repRows.push([p.code, p.desc, p.mrp, cbpStr(oc), op || "", mvP(p, "in") || "", mvP(p, "out") || "",
+          mvP(p, "whole") || "", mvP(p, "retail") || "", mvP(p, "edit") || "", cbpStr(cc), cp, inrp(cp * cost)]);
+      });
+      repRows.push(["", "TOTAL", "", "", t.open, t.in, t.out, t.whole, t.retail, t.edit, "", t.cl, inrp(t.val)]);
+      autoTable(doc, {
+        startY: 24,
+        head: [["Code", "Product", "MRP", "Opening C·B·P", "Op Pcs", "In", "Out", "Whlsl", "Retail", "Edit", "Closing C·B·P", "Cl Pcs", "Value (Cost)"]],
+        body: repRows,
+        theme: "grid",
+        styles: { font: "helvetica", fontSize: 7, cellPadding: 1.2, textColor: [42, 32, 24], lineColor: [210, 194, 168] },
+        headStyles: { fillColor: [239, 230, 214], textColor: [91, 74, 58], fontStyle: "bold", fontSize: 7 },
+        columnStyles: { 1: { cellWidth: 52 }, 0: { cellWidth: 20 } },
+        didParseCell: (d) => { if (d.row.index === repRows.length - 1) { d.cell.styles.fontStyle = "bold"; d.cell.styles.fillColor = [239, 230, 214]; } },
+      });
+
+      // ---- Stock Take ----
+      doc.addPage("a4", "landscape");
+      title("Daily Stock Take");
+      const stRows = [];
+      let counted = 0, shortV = 0, excessV = 0;
+      ps.forEach((p) => {
+        const ct = counts[p.code]; if (!ct) return;
+        counted++;
+        const cc = closingCBP(p.code), cp = closingPcs(p.code);
+        const phys = toPcs(ct.c, ct.b, ct.p, p.pcsCase, p.pcsOuter);
+        const d = phys - cp;
+        if (d < 0) shortV += -d * p.mrp; else if (d > 0) excessV += d * p.mrp;
+        stRows.push([p.code, p.desc, cbpStr(cc), cp, `${ct.c}·${ct.b}·${ct.p}`, phys,
+          d === 0 ? "0" : (d > 0 ? "+" : "") + d, d ? inrp(d * p.mrp) : "", remarks[p.code] || ""]);
+      });
+      if (stRows.length === 0) {
+        doc.setFontSize(10); doc.setTextColor(120, 110, 95);
+        doc.text("No physical stock count was recorded for this day.", 14, 30);
+      } else {
+        autoTable(doc, {
+          startY: 24,
+          head: [["Code", "Product", "System C·B·P", "Sys Pcs", "Physical C·B·P", "Phys Pcs", "Diff Pcs", "Diff Value", "Remarks"]],
+          body: stRows,
+          theme: "grid",
+          styles: { font: "helvetica", fontSize: 7.5, cellPadding: 1.4, textColor: [42, 32, 24], lineColor: [210, 194, 168] },
+          headStyles: { fillColor: [239, 230, 214], textColor: [91, 74, 58], fontStyle: "bold", fontSize: 7.5 },
+          columnStyles: { 1: { cellWidth: 55 }, 8: { cellWidth: 60 } },
+          didParseCell: (d) => {
+            if (d.section === "body" && d.column.index === 6) {
+              const v = String(d.cell.raw);
+              if (v.startsWith("-")) d.cell.styles.textColor = [179, 38, 30];
+              else if (v.startsWith("+")) d.cell.styles.textColor = [138, 90, 0];
+            }
+          },
+        });
+        const afterY = doc.lastAutoTable.finalY + 6;
+        doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(42, 32, 24);
+        doc.text(`Items counted: ${counted}    Short value: ${inrp(shortV)}    Excess value: ${inrp(excessV)}`, 14, afterY);
+      }
+
+      // footer on every page
+      const pages = doc.internal.getNumberOfPages();
+      for (let i = 1; i <= pages; i++) {
+        doc.setPage(i);
+        const H = doc.internal.pageSize.getHeight();
+        doc.setFont("helvetica", "normal"); doc.setFontSize(7.5); doc.setTextColor(150, 138, 114);
+        doc.text(`An app by Jain Ankit and Co, Chartered Accountants   ·   Generated ${new Date().toLocaleString("en-IN")}`, 14, H - 6);
+        doc.text(`Page ${i} of ${pages}`, W - 14, H - 6, { align: "right" });
+      }
+
+      doc.save(`Anchor_${wh.replace(/[^\w]+/g, "_")}_${date}.pdf`);
+      await kvSet(reportKey(wh, date), { by: myEmail, at: new Date().toISOString() });
+      setReported(true);
+      setPromptReport(false);
+      setDbError(null);
+    } catch (e) {
+      setDbError("Report failed: " + (e.message || e));
+    }
+    setGenning(false);
+  };
+
   // ---- rename warehouse (admin): migrates all day-keys to the new name ----
   const [renaming, setRenaming] = useState(false);
   const renameWarehouse = async () => {
@@ -1283,14 +1411,31 @@ export default function App() {
         {(tab === "entry" || tab === "stocktake") && (
           <div className="savebox">
             {locked
-              ? <span className="lockpill" title={`Locked for ${fmtDate(date)}`}>🔒 Day locked</span>
+              ? <span className="lockpill" title={`Locked for ${fmtDate(date)}`}>🔒 Locked</span>
               : <span className="saved">✓ auto-saved</span>}
-            {locked && isAdmin && <button className="ghost2" onClick={reopenDay} disabled={saving}>Reopen day</button>}
-            {!locked && <button className="save" onClick={save} disabled={saving} title="Lock this day so it can't be edited">{saving ? "Saving…" : "Save & Lock Day"}</button>}
+            {!locked && <button className="save" onClick={save} disabled={saving || prevBlocked} title="Lock this day so it can't be edited">{saving ? "Saving…" : "Save & Lock Day"}</button>}
+            {locked && isAdmin && <button className="ghost2" onClick={reopenDay} disabled={saving || genning}>Reopen</button>}
+            <button className={"save" + (locked && !reported ? " pulse" : "")} onClick={generateReport}
+              disabled={!locked || genning} title={locked ? "Generate the daily PDF report" : "Save & Lock the day first"}>
+              {genning ? "Generating…" : reported ? "✓ Report" : "📄 Report"}
+            </button>
           </div>
         )}
         {tab === "config" && <span className="saved" style={{ padding: "8px 0" }}>changes save automatically</span>}
       </div>
+
+      {prevBlocked && (tab === "entry" || tab === "stocktake") && (
+        <div className="blockbar">
+          <span>⚠ The daily report for <b>{fmtDate(prevDate)}</b> hasn't been generated yet. Generate it before working on {fmtDate(date)}.</span>
+          <button className="ghost2" onClick={() => setDate(prevDate)}>Go to {fmtDate(prevDate)} →</button>
+        </div>
+      )}
+      {promptReport && locked && !reported && (tab === "entry" || tab === "stocktake") && (
+        <div className="promptbar">
+          <span>✓ Day saved & locked. Generate the daily PDF report to complete the day.</span>
+          <button className="save" onClick={generateReport} disabled={genning}>{genning ? "Generating…" : "📄 Generate report"}</button>
+        </div>
+      )}
 
       {/* ===== dashboard ===== */}
       {tab === "dashboard" && (() => {
@@ -2128,6 +2273,10 @@ const CSS = `
 .rmk:focus { outline:none; border-color:#6b1f24; background:#fff; box-shadow:0 0 0 2px rgba(107,31,36,.12); }
 .rmk:disabled { background:#f0ece3; color:#5b4a3a; cursor:default; border-color:#e7dccb; }
 .lockpill { color:#8a5a00; font-size:12px; font-weight:700; }
+.blockbar { display:flex; align-items:center; justify-content:space-between; gap:14px; background:#fdecec; color:#8a2b25; border-bottom:1px solid #f0c4c0; padding:9px 18px; font-size:13px; font-weight:600; }
+.promptbar { display:flex; align-items:center; justify-content:space-between; gap:14px; background:#eaf6ee; color:#1b6b40; border-bottom:1px solid #b9dfc7; padding:9px 18px; font-size:13px; font-weight:600; }
+.save.pulse { animation:pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { box-shadow:0 0 0 0 rgba(107,31,36,.5); } 50% { box-shadow:0 0 0 5px rgba(107,31,36,0); } }
 .dberr { background:#b3261e; color:#fff; padding:9px 18px; font-size:13px; font-weight:600; display:flex; align-items:center; }
 .dberr .ghost2 { color:#fff; border-color:rgba(255,255,255,.5); }
 .addpanel { margin:0 18px 10px; padding:12px 14px; background:#fff; border:1.5px solid #6b1f24; border-radius:9px; }
