@@ -842,10 +842,9 @@ export default function App() {
       // previous day blocks the next only if it was actually worked on (locked, or has
       // saved movements/counts) AND its report hasn't been generated. Independent of
       // lock state, so reopening a reported day (which clears its report) re-blocks.
-      const hasData = (o) => o && Object.keys(o).length > 0;
-      const prevWorked = !!m[lockKey(whName, prev)] || hasData(m[mvKey(whName, prev)]) || hasData(m[countKey(whName, prev)]);
-      // gating only applies from REPORT_GATE_FROM onward (feature start date)
-      setPrevBlocked(d >= REPORT_GATE_FROM && prevWorked && !m[reportKey(whName, prev)]);
+      // From REPORT_GATE_FROM onward, a day is blocked unless the immediately previous
+      // day is BOTH locked and reported — this also prevents skipping ahead to future days.
+      setPrevBlocked(d >= REPORT_GATE_FROM && !(m[lockKey(whName, prev)] && m[reportKey(whName, prev)]));
       setPrevDate(prev);
       setPromptReport(false);
       setDbError(null);
@@ -1194,8 +1193,88 @@ export default function App() {
         doc.text(`${wh}  ·  ${fmtDate(date)}`, W - 14, 19.5, { align: "right" });
       };
 
-      // ---- Stock Report ----
-      title("Daily Stock Report");
+      const RED = [179, 38, 30], GRN = [27, 127, 77], AMB = [138, 90, 0], INK = [42, 32, 24];
+
+      // ---- single pass: summary metrics ----
+      let openCost = 0, closeCost = 0, negItems = 0, skus = 0;
+      const mvT = { in: 0, out: 0, whole: 0, retail: 0, edit: 0 };
+      let counted = 0, matched = 0, shortItems = 0, shortPcs = 0, shortVal = 0, excessItems = 0, excessPcs = 0, excessVal = 0;
+      const topSales = [];
+      ps.forEach((p) => {
+        const op = openPcs(p.code), cp = closingPcs(p.code);
+        const cost = skuPricing(p.mrp, config.perSku[p.code] || {}, config.ourMargin).cost;
+        openCost += op * cost; closeCost += cp * cost;
+        if (cp < 0) negItems++; if (cp > 0) skus++;
+        MOVES.forEach((m) => { mvT[m.key] += mvP(p, m.key); });
+        const sold = mvP(p, "out") + mvP(p, "whole");
+        if (sold > 0) topSales.push({ desc: p.desc, sold });
+        const ct = counts[p.code];
+        if (ct) {
+          counted++;
+          const phys = toPcs(ct.c, ct.b, ct.p, p.pcsCase, p.pcsOuter);
+          const d = phys - cp;
+          if (d === 0) matched++;
+          else if (d < 0) { shortItems++; shortPcs += -d; shortVal += -d * p.mrp; }
+          else { excessItems++; excessPcs += d; excessVal += d * p.mrp; }
+        }
+      });
+      const netDiffVal = excessVal - shortVal;
+      topSales.sort((a, b) => b.sold - a.sold);
+
+      // ---- Page 1: Summary dashboard ----
+      title("Daily Summary");
+      const margin = 14, gap = 4, cols = 3, cw = (W - margin * 2 - gap * (cols - 1)) / cols, ch = 19;
+      const card = (x, y, w, h, label, value, color, sub) => {
+        doc.setFillColor(249, 246, 239); doc.setDrawColor(210, 194, 168); doc.setLineWidth(0.2);
+        doc.roundedRect(x, y, w, h, 1.6, 1.6, "FD");
+        doc.setFont("helvetica", "normal"); doc.setFontSize(6.3); doc.setTextColor(130, 120, 104);
+        doc.text(String(label).toUpperCase(), x + 3.5, y + 5.2);
+        doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.setTextColor(...(color || INK));
+        doc.text(String(value), x + 3.5, y + 12.5);
+        if (sub) { doc.setFont("helvetica", "normal"); doc.setFontSize(6); doc.setTextColor(150, 138, 114); doc.text(String(sub), x + 3.5, y + 16.5); }
+      };
+      const grid = (items, y0) => items.forEach((it, i) => {
+        const r = Math.floor(i / cols), c = i % cols;
+        card(margin + c * (cw + gap), y0 + r * (ch + gap), cw, ch, it.l, it.v, it.color, it.s);
+      });
+      doc.setFont("helvetica", "bold"); doc.setFontSize(9.5); doc.setTextColor(107, 31, 36);
+      doc.text("Stock & Movement", margin, 30);
+      grid([
+        { l: "Opening Value (Cost)", v: inrp(openCost) },
+        { l: "Closing Value (Cost)", v: inrp(closeCost) },
+        { l: "SKUs in Stock", v: skus, s: `of ${ps.length} products` },
+        { l: "Stock In (pcs)", v: mvT.in, color: GRN },
+        { l: "Retail Out (pcs)", v: mvT.out, color: RED },
+        { l: "Wholesale (pcs)", v: mvT.whole, color: AMB },
+      ], 33);
+      const takeHeadY = 33 + 2 * (ch + gap) + 8;
+      doc.setFont("helvetica", "bold"); doc.setFontSize(9.5); doc.setTextColor(107, 31, 36);
+      doc.text("Physical Stock Take", margin, takeHeadY);
+      grid([
+        { l: "Items Counted", v: counted },
+        { l: "Matched", v: matched, color: GRN },
+        { l: "Negative Stock Items", v: negItems, color: negItems ? RED : GRN },
+        { l: "Short", v: `${shortItems} items`, color: RED, s: `${shortPcs} pcs · ${inrp(shortVal)}` },
+        { l: "Excess", v: `${excessItems} items`, color: AMB, s: `${excessPcs} pcs · ${inrp(excessVal)}` },
+        { l: "Net Difference Value", v: inrp(netDiffVal), color: netDiffVal < 0 ? RED : netDiffVal > 0 ? AMB : GRN },
+      ], takeHeadY + 4);
+      // top movers
+      const tmY = takeHeadY + 4 + 2 * (ch + gap) + 8;
+      if (topSales.length) {
+        doc.setFont("helvetica", "bold"); doc.setFontSize(9.5); doc.setTextColor(107, 31, 36);
+        doc.text("Top Sellers Today", margin, tmY);
+        autoTable(doc, {
+          startY: tmY + 3, margin: { left: margin, right: W / 2 },
+          head: [["Product", "Sold (pcs)"]], body: topSales.slice(0, 5).map((x) => [x.desc, x.sold]),
+          theme: "grid", styles: { font: "helvetica", fontSize: 8, cellPadding: 1.4, lineColor: [210, 194, 168] },
+          headStyles: { fillColor: [239, 230, 214], textColor: [91, 74, 58], fontStyle: "bold" },
+          columnStyles: { 1: { halign: "right", cellWidth: 24 } },
+        });
+      }
+
+      // ---- Page 2: Stock Report ----
+      doc.addPage("a4", "landscape");
+      title("Stock Report");
       const repRows = [], t = { open: 0, in: 0, out: 0, whole: 0, retail: 0, edit: 0, cl: 0, val: 0 };
       ps.forEach((p) => {
         const oc = openCBP(p.code), op = openPcs(p.code);
@@ -1214,24 +1293,27 @@ export default function App() {
         head: [["Code", "Product", "MRP", "Opening C·B·P", "Op Pcs", "In", "Out", "Whlsl", "Retail", "Edit", "Closing C·B·P", "Cl Pcs", "Value (Cost)"]],
         body: repRows,
         theme: "grid",
-        styles: { font: "helvetica", fontSize: 7, cellPadding: 1.2, textColor: [42, 32, 24], lineColor: [210, 194, 168] },
+        styles: { font: "helvetica", fontSize: 7, cellPadding: 1.2, textColor: INK, lineColor: [210, 194, 168] },
         headStyles: { fillColor: [239, 230, 214], textColor: [91, 74, 58], fontStyle: "bold", fontSize: 7 },
         columnStyles: { 1: { cellWidth: 52 }, 0: { cellWidth: 20 } },
-        didParseCell: (d) => { if (d.row.index === repRows.length - 1) { d.cell.styles.fontStyle = "bold"; d.cell.styles.fillColor = [239, 230, 214]; } },
+        didParseCell: (d) => {
+          const isTotal = d.row.index === repRows.length - 1;
+          if (isTotal) { d.cell.styles.fontStyle = "bold"; d.cell.styles.fillColor = [239, 230, 214]; }
+          // highlight negative closing rows in red
+          const raw = d.row.raw; const cl = raw && Number(raw[11]);
+          if (d.section === "body" && !isTotal && cl < 0) { d.cell.styles.textColor = RED; d.cell.styles.fillColor = [253, 236, 236]; }
+        },
       });
 
-      // ---- Stock Take ----
+      // ---- Page 3: Stock Take ----
       doc.addPage("a4", "landscape");
-      title("Daily Stock Take");
+      title("Stock Take");
       const stRows = [];
-      let counted = 0, shortV = 0, excessV = 0;
       ps.forEach((p) => {
         const ct = counts[p.code]; if (!ct) return;
-        counted++;
         const cc = closingCBP(p.code), cp = closingPcs(p.code);
         const phys = toPcs(ct.c, ct.b, ct.p, p.pcsCase, p.pcsOuter);
         const d = phys - cp;
-        if (d < 0) shortV += -d * p.mrp; else if (d > 0) excessV += d * p.mrp;
         stRows.push([p.code, p.desc, cbpStr(cc), cp, `${ct.c}·${ct.b}·${ct.p}`, phys,
           d === 0 ? "0" : (d > 0 ? "+" : "") + d, d ? inrp(d * p.mrp) : "", remarks[p.code] || ""]);
       });
@@ -1244,20 +1326,24 @@ export default function App() {
           head: [["Code", "Product", "System C·B·P", "Sys Pcs", "Physical C·B·P", "Phys Pcs", "Diff Pcs", "Diff Value", "Remarks"]],
           body: stRows,
           theme: "grid",
-          styles: { font: "helvetica", fontSize: 7.5, cellPadding: 1.4, textColor: [42, 32, 24], lineColor: [210, 194, 168] },
+          styles: { font: "helvetica", fontSize: 7.5, cellPadding: 1.4, textColor: INK, lineColor: [210, 194, 168] },
           headStyles: { fillColor: [239, 230, 214], textColor: [91, 74, 58], fontStyle: "bold", fontSize: 7.5 },
           columnStyles: { 1: { cellWidth: 55 }, 8: { cellWidth: 60 } },
           didParseCell: (d) => {
-            if (d.section === "body" && d.column.index === 6) {
-              const v = String(d.cell.raw);
-              if (v.startsWith("-")) d.cell.styles.textColor = [179, 38, 30];
-              else if (v.startsWith("+")) d.cell.styles.textColor = [138, 90, 0];
+            if (d.section !== "body") return;
+            const dv = String(d.row.raw[6] || "");
+            // shade the whole differing row, and colour the diff columns
+            if (dv.startsWith("-")) d.cell.styles.fillColor = [253, 236, 236];
+            else if (dv.startsWith("+")) d.cell.styles.fillColor = [250, 244, 225];
+            if (d.column.index === 6 || d.column.index === 7) {
+              if (dv.startsWith("-")) d.cell.styles.textColor = RED;
+              else if (dv.startsWith("+")) d.cell.styles.textColor = AMB;
             }
           },
         });
         const afterY = doc.lastAutoTable.finalY + 6;
-        doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(42, 32, 24);
-        doc.text(`Items counted: ${counted}    Short value: ${inrp(shortV)}    Excess value: ${inrp(excessV)}`, 14, afterY);
+        doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(...INK);
+        doc.text(`Counted: ${counted}    Matched: ${matched}    Short: ${shortItems} (${inrp(shortVal)})    Excess: ${excessItems} (${inrp(excessVal)})    Net diff: ${inrp(netDiffVal)}`, 14, afterY);
       }
 
       // footer on every page
