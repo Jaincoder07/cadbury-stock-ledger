@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useDeferredValue, useRef } from "react";
-import { supabase, kvGetMany, kvSet, kvSetBg, kvGetLike, kvGetRange, kvUpsertMany, kvDeleteMany, onStorageError } from "./storage";
+import { supabase, kvGet, kvGetMany, kvSet, kvSetBg, kvGetLike, kvGetRange, kvUpsertMany, kvDeleteMany, onStorageError } from "./storage";
 import * as XLSX from "xlsx";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -112,6 +112,7 @@ const countKey = (wh, date) => `cad:count:${wh}:${date}`; // physical stock-take
 const remarkKey = (wh, date) => `cad:remark:${wh}:${date}`; // stock-take remarks (code -> text)
 const lockKey = (wh, date) => `cad:lock:${wh}:${date}`;   // day locked after Save Day
 const reportKey = (wh, date) => `cad:report:${wh}:${date}`; // daily PDF report generated flag
+const invoicesKey = (wh) => `cad:invoices:${wh}`;         // wholesale invoices for a warehouse
 const REPORT_GATE_FROM = "2026-07-10"; // next-day report gating applies only from this date on
 
 // storage lives in Supabase (src/storage.js) — shared across all devices/users.
@@ -593,6 +594,319 @@ function NumCell({ value, onChange, accent, disabled }) {
   );
 }
 
+// ---------- module picker (shown on login) ----------
+function ModulePicker({ onPick }) {
+  return (
+    <div className="wrap" style={{ display: "grid", placeItems: "center", minHeight: "100vh" }}>
+      <style>{CSS}</style>
+      <div style={{ textAlign: "center" }}>
+        <div className="logo" style={{ margin: "0 auto 10px" }} aria-label="Anchor">⚓</div>
+        <div className="title" style={{ color: "#2a2018" }}>ANCHOR</div>
+        <div className="sub" style={{ color: "#6b5a45", marginBottom: 22 }}>Choose a module</div>
+        <div style={{ display: "flex", gap: 16, justifyContent: "center", flexWrap: "wrap" }}>
+          <button className="modcard" onClick={() => onPick("ledger")}>
+            <div className="modicon">📦</div>
+            <div className="modname">Stock Ledger</div>
+            <div className="modsub">Daily entry, stock take, reports & dashboard</div>
+          </button>
+          <button className="modcard" onClick={() => onPick("invoicing")}>
+            <div className="modicon">🧾</div>
+            <div className="modname">Wholesale Invoicing</div>
+            <div className="modsub">Create wholesale invoices & post stock-out</div>
+          </button>
+        </div>
+        <div className="credit" style={{ marginTop: 24 }}>An app by Jain Ankit and Co, Chartered Accountants</div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- wholesale invoicing module ----------
+function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAdmin, signOut, onSwitchModule }) {
+  const [invoices, setInvoices] = useState(null);   // array
+  const [editing, setEditing] = useState(null);     // invoice being edited/created
+  const [dbErr, setDbErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [pickQuery, setPickQuery] = useState("");
+
+  const wsRate = (p) => {
+    const ws = config.perSku[p.code]?.ws ?? SKU_DEFAULTS.ws;
+    return Math.round(p.mrp * (1 - ws / 100) * 100) / 100;
+  };
+  const prodByCode = useMemo(() => { const m = {}; (products || []).forEach((p) => (m[p.code] = p)); return m; }, [products]);
+
+  useEffect(() => {
+    if (!wh) return;
+    let alive = true;
+    (async () => {
+      try { const list = await kvGet(invoicesKey(wh)); if (alive) setInvoices(list || []); }
+      catch (e) { setDbErr(e.message || String(e)); if (alive) setInvoices([]); }
+    })();
+    return () => { alive = false; };
+  }, [wh]);
+
+  const persist = async (list) => {
+    setInvoices(list);
+    try { await kvSet(invoicesKey(wh), list); setDbErr(null); }
+    catch (e) { setDbErr("Save failed: " + (e.message || e)); }
+  };
+
+  const nextNo = () => {
+    const nums = (invoices || []).map((i) => parseInt(String(i.no).replace(/\D/g, ""), 10) || 0);
+    return "INV-" + String((nums.length ? Math.max(...nums) : 0) + 1).padStart(4, "0");
+  };
+  const newInvoice = () => setEditing({ id: "inv_" + Date.now(), no: nextNo(), date: todayStr(), party: "", items: [], note: "", posted: null });
+  const editInvoice = (inv) => setEditing(JSON.parse(JSON.stringify(inv)));
+
+  const addLine = (p) => {
+    setEditing((e) => ({ ...e, items: [...e.items, { code: p.code, desc: p.desc, c: 0, b: 0, p: 0, rate: wsRate(p), pcsCase: p.pcsCase, pcsOuter: p.pcsOuter, mrp: p.mrp }] }));
+    setPickQuery("");
+  };
+  const setLine = (idx, field, val) => setEditing((e) => {
+    const items = e.items.slice(); items[idx] = { ...items[idx], [field]: val }; return { ...e, items };
+  });
+  const delLine = (idx) => setEditing((e) => ({ ...e, items: e.items.filter((_, i) => i !== idx) }));
+
+  const linePcs = (it) => toPcs(it.c, it.b, it.p, it.pcsCase, it.pcsOuter);
+  const lineAmt = (it) => linePcs(it) * (Number(it.rate) || 0);
+  const invTotal = (inv) => (inv.items || []).reduce((a, it) => a + lineAmt(it), 0);
+
+  const saveInvoice = async (inv) => {
+    const list = invoices.slice();
+    const i = list.findIndex((x) => x.id === inv.id);
+    if (i >= 0) list[i] = inv; else list.push(inv);
+    await persist(list);
+  };
+
+  // post the invoice's quantities into the day's Wholesale movement (auto stock-out)
+  const postToStock = async (inv) => {
+    setBusy(true);
+    try {
+      const locked = await kvGet(lockKey(wh, inv.date));
+      if (locked && !isAdmin) { alert(`${fmtDate(inv.date)} is locked. Ask an admin to reopen it before posting.`); setBusy(false); return; }
+      const key = mvKey(wh, inv.date);
+      const mv = (await kvGet(key)) || {};
+      const apply = (code, dc, db, dp) => {
+        const row = { ...(mv[code] || {}) };
+        const cell = { ...(row.whole || { c: 0, b: 0, p: 0 }) };
+        cell.c += dc; cell.b += db; cell.p += dp;
+        row.whole = cell; mv[code] = row;
+      };
+      (inv.posted?.items || []).forEach((it) => apply(it.code, -it.c, -it.b, -it.p)); // reverse prior post
+      inv.items.forEach((it) => apply(it.code, it.c, it.b, it.p));
+      await kvSet(key, mv);
+      const snap = inv.items.map((it) => ({ code: it.code, c: it.c, b: it.b, p: it.p }));
+      const updated = { ...inv, posted: { at: new Date().toISOString(), by: myEmail, items: snap } };
+      await saveInvoice(updated);
+      setEditing(null);
+      alert(`Invoice ${inv.no} posted — wholesale stock-out recorded on ${fmtDate(inv.date)}.`);
+    } catch (e) { setDbErr("Post failed: " + (e.message || e)); }
+    setBusy(false);
+  };
+
+  const unpost = async (inv) => {
+    if (!inv.posted) return;
+    if (!window.confirm(`Reverse the stock-out for ${inv.no}?`)) return;
+    setBusy(true);
+    try {
+      const key = mvKey(wh, inv.date);
+      const mv = (await kvGet(key)) || {};
+      inv.posted.items.forEach((it) => {
+        const row = { ...(mv[it.code] || {}) }; const cell = { ...(row.whole || { c: 0, b: 0, p: 0 }) };
+        cell.c -= it.c; cell.b -= it.b; cell.p -= it.p; row.whole = cell; mv[it.code] = row;
+      });
+      await kvSet(key, mv);
+      await saveInvoice({ ...inv, posted: null });
+    } catch (e) { setDbErr("Reverse failed: " + (e.message || e)); }
+    setBusy(false);
+  };
+
+  const deleteInvoice = async (inv) => {
+    if (!window.confirm(`Delete invoice ${inv.no}?`)) return;
+    if (inv.posted) await unpost(inv);
+    await persist((invoices || []).filter((x) => x.id !== inv.id));
+    setEditing(null);
+  };
+
+  const invoicePDF = (inv) => {
+    const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+    const W = doc.internal.pageSize.getWidth();
+    doc.setFont("helvetica", "bold"); doc.setFontSize(16); doc.setTextColor(107, 31, 36);
+    doc.text("KWALITY VENTURES", 14, 16);
+    doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(90, 74, 58);
+    doc.text("Mondelez Distribution", 14, 21.5);
+    doc.text(wh, 14, 26);
+    doc.setFont("helvetica", "bold"); doc.setFontSize(13); doc.setTextColor(42, 32, 24);
+    doc.text("WHOLESALE INVOICE", W - 14, 16, { align: "right" });
+    doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(90, 74, 58);
+    doc.text(`No: ${inv.no}`, W - 14, 22, { align: "right" });
+    doc.text(`Date: ${fmtDate(inv.date)}`, W - 14, 26.5, { align: "right" });
+    doc.setDrawColor(210, 194, 168); doc.line(14, 30, W - 14, 30);
+    doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(42, 32, 24);
+    doc.text("Billed to:", 14, 37);
+    doc.setFont("helvetica", "normal"); doc.text(inv.party || "—", 30, 37);
+    const body = (inv.items || []).map((it, i) => [i + 1, it.desc, `${it.c}·${it.b}·${it.p}`, linePcs(it), (Number(it.rate) || 0).toFixed(2), "Rs " + Math.round(lineAmt(it)).toLocaleString("en-IN")]);
+    autoTable(doc, {
+      startY: 42,
+      head: [["#", "Product", "C·B·P", "Pcs", "Rate", "Amount"]],
+      body,
+      theme: "grid",
+      styles: { font: "helvetica", fontSize: 9, cellPadding: 1.6, textColor: [42, 32, 24], lineColor: [210, 194, 168] },
+      headStyles: { fillColor: [239, 230, 214], textColor: [91, 74, 58], fontStyle: "bold" },
+      columnStyles: { 0: { cellWidth: 10 }, 3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right", cellWidth: 30 } },
+    });
+    const y = doc.lastAutoTable.finalY + 8;
+    doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.setTextColor(42, 32, 24);
+    doc.text(`Total: Rs ${Math.round(invTotal(inv)).toLocaleString("en-IN")}`, W - 14, y, { align: "right" });
+    const H = doc.internal.pageSize.getHeight();
+    doc.setFont("helvetica", "normal"); doc.setFontSize(7.5); doc.setTextColor(150, 138, 114);
+    doc.text("An app by Jain Ankit and Co, Chartered Accountants", 14, H - 8);
+    doc.save(`Invoice_${inv.no}_${inv.date}.pdf`);
+  };
+
+  const psFiltered = useMemo(() => {
+    const q = pickQuery.trim().toLowerCase();
+    if (!q) return [];
+    return (products || []).filter((p) => p.desc.toLowerCase().includes(q) || p.code.toLowerCase().includes(q)).slice(0, 8);
+  }, [pickQuery, products]);
+
+  return (
+    <div className="wrap">
+      <style>{CSS}</style>
+      {dbErr && <div className="dberr">⚠ {dbErr}</div>}
+      <div className="topbar">
+        <div className="brand">
+          <div className="logo" aria-label="Anchor">⚓</div>
+          <div>
+            <div className="title">ANCHOR · INVOICING</div>
+            <div className="sub">Kwality Ventures · Wholesale</div>
+          </div>
+        </div>
+        <div className="controls">
+          <select className="whsel" value={wh} onChange={(e) => setWh(e.target.value)} title="Warehouse">
+            {allowedWh.map((w) => <option key={w}>{w}</option>)}
+          </select>
+          <span className="sep" />
+          <button className="ghost" onClick={onSwitchModule}>⇄ Modules</button>
+          <button className="ghost" onClick={signOut}>{myEmail.split("@")[0]} ⏻</button>
+        </div>
+      </div>
+
+      {!editing && (
+        <div className="report">
+          <div className="toolbar">
+            <div className="ptitle" style={{ margin: 0, fontSize: 13, color: "#2a2018", fontWeight: 700 }}>Wholesale Invoices — {wh}</div>
+            <div className="spacer" />
+            <button className="save" onClick={newInvoice}>＋ New Invoice</button>
+          </div>
+          <div className="gridwrap" style={{ maxHeight: "none" }}>
+            <table className="grid">
+              <thead><tr>
+                <th className="stick code">No.</th><th className="stick desc">Party</th>
+                <th>Date</th><th className="num">Items</th><th className="num">Total</th><th>Status</th><th></th>
+              </tr></thead>
+              <tbody>
+                {(invoices || []).slice().reverse().map((inv) => (
+                  <tr key={inv.id}>
+                    <td className="stick code mono">{inv.no}</td>
+                    <td className="stick desc">{inv.party || "—"}</td>
+                    <td>{fmtDate(inv.date)}</td>
+                    <td className="num">{inv.items.length}</td>
+                    <td className="num">{inr(invTotal(inv))}</td>
+                    <td>{inv.posted ? <span className="oktxt">✓ posted</span> : <span className="dim">draft</span>}</td>
+                    <td className="inp" style={{ whiteSpace: "nowrap" }}>
+                      <button className="unct" onClick={() => editInvoice(inv)}>Open</button>
+                      <button className="unct" style={{ marginLeft: 6 }} onClick={() => invoicePDF(inv)}>📄 PDF</button>
+                    </td>
+                  </tr>
+                ))}
+                {invoices && invoices.length === 0 && <tr><td colSpan={7} className="dim" style={{ padding: 16 }}>No invoices yet. Click "New Invoice".</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {editing && (
+        <div className="report">
+          <div className="toolbar">
+            <button className="ghost2" onClick={() => setEditing(null)}>← Back</button>
+            <div className="ptitle" style={{ margin: 0, fontSize: 14, color: "#2a2018", fontWeight: 700 }}>{editing.no}</div>
+            {editing.posted && <span className="oktxt" style={{ fontSize: 12 }}>✓ posted to stock ({fmtDate(editing.date)})</span>}
+            <div className="spacer" />
+            <button className="ghost2" onClick={() => invoicePDF(editing)}>📄 PDF</button>
+            {isAdmin && <button className="unct del" onClick={() => deleteInvoice(editing)}>🗑 Delete</button>}
+          </div>
+
+          <div className="addpanel" style={{ margin: "0 18px 12px" }}>
+            <div className="aprow">
+              <label>Invoice No<input value={editing.no} onChange={(e) => setEditing({ ...editing, no: e.target.value })} /></label>
+              <label>Date<input type="date" value={editing.date} onChange={(e) => setEditing({ ...editing, date: e.target.value })} style={{ width: 140 }} /></label>
+              <label className="wide">Wholesaler / Party<input value={editing.party} onChange={(e) => setEditing({ ...editing, party: e.target.value })} placeholder="Party name" /></label>
+            </div>
+          </div>
+
+          <div className="toolbar" style={{ paddingTop: 0 }}>
+            <div style={{ position: "relative" }}>
+              <input className="search" style={{ minWidth: 280 }} placeholder="Add item — search product or code…" value={pickQuery} onChange={(e) => setPickQuery(e.target.value)} />
+              {psFiltered.length > 0 && (
+                <div className="hfpop" style={{ left: 0, right: "auto", width: 320, top: "100%" }}>
+                  {psFiltered.map((p) => (
+                    <div key={p.code} className="hfitem" onClick={() => addLine(p)}>
+                      <span className="mono" style={{ fontSize: 11, color: "#6b5a45", minWidth: 60 }}>{p.code}</span> {p.desc}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="gridwrap" style={{ maxHeight: "none" }}>
+            <table className="grid">
+              <thead><tr>
+                <th className="stick code">Code</th><th className="stick desc">Product</th>
+                <th>Case</th><th>Box</th><th>Pcs</th><th className="num">Total Pcs</th>
+                <th className="num">Rate (WS)</th><th className="num">Amount</th><th></th>
+              </tr></thead>
+              <tbody>
+                {editing.items.map((it, idx) => (
+                  <tr key={idx}>
+                    <td className="stick code mono">{it.code}</td>
+                    <td className="stick desc">{it.desc}</td>
+                    <td className="inp"><NumCell value={it.c} onChange={(v) => setLine(idx, "c", v)} /></td>
+                    <td className="inp"><NumCell value={it.b} onChange={(v) => setLine(idx, "b", v)} /></td>
+                    <td className="inp"><NumCell value={it.p} onChange={(v) => setLine(idx, "p", v)} /></td>
+                    <td className="num">{linePcs(it)}</td>
+                    <td className="inp"><DecCell value={it.rate} onChange={(v) => setLine(idx, "rate", v)} /></td>
+                    <td className="num">{inr(lineAmt(it))}</td>
+                    <td className="inp"><button className="unct del" onClick={() => delLine(idx)}>✕</button></td>
+                  </tr>
+                ))}
+                {editing.items.length === 0 && <tr><td colSpan={9} className="dim" style={{ padding: 14 }}>Search above to add items. Rate auto-fills from each product's WS% and is editable.</td></tr>}
+              </tbody>
+              {editing.items.length > 0 && <tfoot><tr className="trow">
+                <td className="stick code">TOTAL</td><td className="stick desc">{editing.items.length} items</td>
+                <td></td><td></td><td></td><td className="num">{editing.items.reduce((a, it) => a + linePcs(it), 0)}</td>
+                <td></td><td className="num">{inr(invTotal(editing))}</td><td></td>
+              </tr></tfoot>}
+            </table>
+          </div>
+
+          <div className="footbar">
+            <div className="dim">Posting records a Wholesale stock-out on {fmtDate(editing.date)} against this invoice.</div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button className="ghost2" onClick={() => saveInvoice(editing).then(() => alert("Saved as draft."))} disabled={busy}>Save draft</button>
+              {editing.posted && <button className="ghost2" onClick={() => unpost(editing)} disabled={busy}>Reverse post</button>}
+              <button className="save" onClick={() => postToStock(editing)} disabled={busy || editing.items.length === 0}>{busy ? "…" : editing.posted ? "Re-post to stock" : "Post to stock (Wholesale out)"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+      <div className="credit">An app by Jain Ankit and Co, Chartered Accountants</div>
+    </div>
+  );
+}
+
 export default function App() {
   const [products, setProducts] = useState(null);
   const [warehouses, setWarehouses] = useState(WAREHOUSES_DEFAULT);
@@ -606,6 +920,7 @@ export default function App() {
   const [savedAt, setSavedAt] = useState(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("dashboard");   // dashboard | entry | stocktake | report | monthly | config | users
+  const [moduleSel, setModuleSel] = useState(null); // null (picker) | "ledger" | "invoicing"
   const [showZero, setShowZero] = useState(true);
   const [config, setConfig] = useState(CONFIG_DEFAULT);
 
@@ -1443,6 +1758,14 @@ export default function App() {
     </div>
   );
 
+  // module selection: admin gets a picker on login; non-admins go straight to ledger for now
+  const effectiveModule = isAdmin ? moduleSel : "ledger";
+  if (isAdmin && !moduleSel) return <ModulePicker onPick={setModuleSel} />;
+  if (effectiveModule === "invoicing") return (
+    <InvoicingModule wh={wh} allowedWh={allowedWh} setWh={setWh} products={products} config={config}
+      myEmail={myEmail} isAdmin={isAdmin} signOut={signOut} onSwitchModule={() => setModuleSel(null)} />
+  );
+
   const activeMv = MOVES.find((m) => m.key === activeMove);
 
   return (
@@ -1483,6 +1806,7 @@ export default function App() {
           <button className="ghost icon" onClick={() => setDate(addDays(date, +1))} title="Next day">›</button>
           {date !== todayStr() && <button className="ghost" onClick={() => setDate(todayStr())}>Today</button>}
           <span className="sep" />
+          {isAdmin && <button className="ghost" onClick={() => setModuleSel(null)} title="Switch module">⇄ Modules</button>}
           <button className="ghost" onClick={signOut} title={`${myEmail} (${isAdmin ? "admin" : "user"}) — sign out`}>
             {myEmail.split("@")[0]} ⏻
           </button>
@@ -2441,6 +2765,11 @@ const CSS = `
 .rv.sm { font-size:14px; font-weight:700; }
 
 .credit { text-align:center; font-size:11px; color:#9a8a72; padding:14px 18px 18px; letter-spacing:.4px; }
+.modcard { background:#fff; border:1.5px solid #d2c2a8; border-radius:12px; padding:22px 20px; width:230px; cursor:pointer; text-align:center; transition:border-color .15s; }
+.modcard:hover { border-color:#6b1f24; background:#fffdf8; }
+.modicon { font-size:34px; margin-bottom:8px; }
+.modname { font-weight:800; letter-spacing:1px; color:#2a2018; font-size:15px; }
+.modsub { font-size:11.5px; color:#6b5a45; margin-top:5px; }
 
 @media (max-width:640px){
   .desc { min-width:150px; max-width:150px; }
