@@ -112,6 +112,7 @@ const countKey = (wh, date) => `cad:count:${wh}:${date}`; // physical stock-take
 const remarkKey = (wh, date) => `cad:remark:${wh}:${date}`; // stock-take remarks (code -> text)
 const lockKey = (wh, date) => `cad:lock:${wh}:${date}`;   // day locked after Save Day
 const reportKey = (wh, date) => `cad:report:${wh}:${date}`; // daily PDF report generated flag
+const REPORT_GATE_FROM = "2026-07-10"; // next-day report gating applies only from this date on
 
 // storage lives in Supabase (src/storage.js) — shared across all devices/users.
 
@@ -843,7 +844,8 @@ export default function App() {
       // lock state, so reopening a reported day (which clears its report) re-blocks.
       const hasData = (o) => o && Object.keys(o).length > 0;
       const prevWorked = !!m[lockKey(whName, prev)] || hasData(m[mvKey(whName, prev)]) || hasData(m[countKey(whName, prev)]);
-      setPrevBlocked(prevWorked && !m[reportKey(whName, prev)]);
+      // gating only applies from REPORT_GATE_FROM onward (feature start date)
+      setPrevBlocked(d >= REPORT_GATE_FROM && prevWorked && !m[reportKey(whName, prev)]);
       setPrevDate(prev);
       setPromptReport(false);
       setDbError(null);
