@@ -533,9 +533,42 @@ function AddProductPanel({ products, onAdd, onClose }) {
 }
 
 // ---------- tiny numeric cell ----------
+// move focus to the nearest input cell in a direction (spreadsheet-style arrows)
+function gridMove(el, dir) {
+  const wrap = el.closest(".gridwrap");
+  if (!wrap) return false;
+  const inputs = [...wrap.querySelectorAll("input.ncell:not([disabled])")];
+  const r = el.getBoundingClientRect();
+  let best = null, bestScore = Infinity;
+  for (const o of inputs) {
+    if (o === el) continue;
+    const b = o.getBoundingClientRect();
+    const dx = b.left - r.left, dy = b.top - r.top;
+    let ok = false, score = 0;
+    if (dir === "right") { ok = dx > 1 && Math.abs(dy) < r.height; score = dx + Math.abs(dy) * 4; }
+    else if (dir === "left") { ok = dx < -1 && Math.abs(dy) < r.height; score = -dx + Math.abs(dy) * 4; }
+    else if (dir === "down") { ok = dy > 1 && Math.abs(dx) < r.width; score = dy + Math.abs(dx) * 4; }
+    else if (dir === "up") { ok = dy < -1 && Math.abs(dx) < r.width; score = -dy + Math.abs(dx) * 4; }
+    if (ok && score < bestScore) { bestScore = score; best = o; }
+  }
+  if (best) { best.focus(); if (best.select) best.select(); return true; }
+  return false;
+}
+
 function NumCell({ value, onChange, accent, disabled }) {
   const [v, setV] = useState(value === 0 || value == null ? "" : String(value));
   useEffect(() => { setV(value === 0 || value == null ? "" : String(value)); }, [value]);
+  const onKey = (e) => {
+    if (e.key === "Enter") { e.target.blur(); return; }
+    const el = e.target, atStart = el.selectionStart === 0 && el.selectionEnd === 0;
+    const atEnd = el.selectionStart === el.value.length && el.selectionEnd === el.value.length;
+    let dir = null;
+    if (e.key === "ArrowUp") dir = "up";
+    else if (e.key === "ArrowDown") dir = "down";
+    else if (e.key === "ArrowLeft" && atStart) dir = "left";
+    else if (e.key === "ArrowRight" && atEnd) dir = "right";
+    if (dir && gridMove(el, dir)) e.preventDefault();
+  };
   return (
     <input
       className="ncell"
@@ -551,7 +584,7 @@ function NumCell({ value, onChange, accent, disabled }) {
         const n = parseInt(v, 10);
         onChange(isNaN(n) ? 0 : n);
       }}
-      onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+      onKeyDown={onKey}
     />
   );
 }
