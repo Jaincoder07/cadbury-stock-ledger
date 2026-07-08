@@ -828,7 +828,8 @@ export default function App() {
       const prev = addDays(d, -1);
       const [m, open] = await Promise.all([
         kvGetMany([mvKey(whName, d), countKey(whName, d), remarkKey(whName, d), lockKey(whName, d),
-                   reportKey(whName, d), lockKey(whName, prev), reportKey(whName, prev)]),
+                   reportKey(whName, d), lockKey(whName, prev), reportKey(whName, prev),
+                   mvKey(whName, prev), countKey(whName, prev)]),
         resolveOpening(whName, d, prods),
       ]);
       setOpening(open);
@@ -837,8 +838,12 @@ export default function App() {
       setRemarks(m[remarkKey(whName, d)] || {});
       setLocked(!!m[lockKey(whName, d)]);
       setReported(!!m[reportKey(whName, d)]);
-      // previous day is a blocker if it was locked (worked on) but its report wasn't generated
-      setPrevBlocked(!!m[lockKey(whName, prev)] && !m[reportKey(whName, prev)]);
+      // previous day blocks the next only if it was actually worked on (locked, or has
+      // saved movements/counts) AND its report hasn't been generated. Independent of
+      // lock state, so reopening a reported day (which clears its report) re-blocks.
+      const hasData = (o) => o && Object.keys(o).length > 0;
+      const prevWorked = !!m[lockKey(whName, prev)] || hasData(m[mvKey(whName, prev)]) || hasData(m[countKey(whName, prev)]);
+      setPrevBlocked(prevWorked && !m[reportKey(whName, prev)]);
       setPrevDate(prev);
       setPromptReport(false);
       setDbError(null);
