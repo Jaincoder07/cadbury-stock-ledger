@@ -2630,7 +2630,8 @@ const CSS = `
 
 .topbar { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:14px 18px; background:#2a2018; color:#f4efe6; flex-wrap:wrap; }
 .brand { display:flex; align-items:center; gap:12px; }
-.logo { width:42px; height:42px; border-radius:9px; background:#6b1f24; color:#fff; display:grid; place-items:center; font-weight:800; letter-spacing:1px; font-size:14px; box-shadow:0 2px 0 #4a1419; }
+.logo { width:42px; height:42px; display:grid; place-items:center; font-size:30px; line-height:1; color:#6b1f24; }
+.topbar .logo { color:#f4efe6; }
 .title { font-weight:800; letter-spacing:2px; font-size:18px; }
 .sub { font-size:11px; opacity:.6; letter-spacing:.5px; }
 .controls { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }

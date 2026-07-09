@@ -3,9 +3,14 @@
 // The anon key below is Supabase's public client key — safe to ship in the bundle.
 import { createClient } from "@supabase/supabase-js";
 
-const SUPABASE_URL = "https://jrnofxyxpvgzdtmdohjq.supabase.co";
-const SUPABASE_ANON_KEY =
+// Defaults = PRODUCTION (used by the live Vercel build). A local .env.local can
+// override these with VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY to point at staging.
+const PROD_URL = "https://jrnofxyxpvgzdtmdohjq.supabase.co";
+const PROD_ANON =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Impybm9meHl4cHZnemR0bWRvaGpxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA4MjE4MDIsImV4cCI6MjA5NjM5NzgwMn0.ms3PDpHFhCNCI69TeE5Y_7uZMVfagUKV54OcyPfzpv8";
+
+const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL || PROD_URL).replace(/\/rest\/v1\/?$/, "");
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || PROD_ANON;
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
