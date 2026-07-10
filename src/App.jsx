@@ -113,6 +113,10 @@ const remarkKey = (wh, date) => `cad:remark:${wh}:${date}`; // stock-take remark
 const lockKey = (wh, date) => `cad:lock:${wh}:${date}`;   // day locked after Save Day
 const reportKey = (wh, date) => `cad:report:${wh}:${date}`; // daily PDF report generated flag
 const invoicesKey = (wh) => `cad:invoices:${wh}`;         // wholesale invoices for a warehouse
+const soKey = (wh) => `cad:so:${wh}`;                     // sales orders for a warehouse
+const K_PARTIES = "cad:parties";                          // wholesaler master (global)
+const K_PAYMENTS = "cad:payments";                        // payments received (global)
+const K_CNOTES = "cad:cnotes";                            // credit notes / returns (global)
 const REPORT_GATE_FROM = "2026-07-10"; // next-day report gating applies only from this date on
 
 // storage lives in Supabase (src/storage.js) — shared across all devices/users.
@@ -623,152 +627,244 @@ function ModulePicker({ onPick }) {
 
 // ---------- wholesale invoicing module ----------
 function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAdmin, signOut, onSwitchModule }) {
-  const [invoices, setInvoices] = useState(null);   // array
-  const [editing, setEditing] = useState(null);     // invoice being edited/created
+  const [view, setView] = useState("invoices"); // invoices | so | payments | credit | ledger | parties
+  const [parties, setParties] = useState([]);
+  const [payments, setPayments] = useState([]);
+  const [cnotes, setCnotes] = useState([]);
+  const [invoices, setInvoices] = useState([]);
+  const [sos, setSos] = useState([]);
+  const [editing, setEditing] = useState(null);   // {kind:'invoice'|'so'|'return', ...}
+  const [pickQuery, setPickQuery] = useState("");
+  const [ledgerParty, setLedgerParty] = useState("");
+  const [ledgerRows, setLedgerRows] = useState(null);
+  const [payForm, setPayForm] = useState(null);    // add-payment form
+  const [creditForm, setCreditForm] = useState(null); // add credit-note form
+  const [partyForm, setPartyForm] = useState(null);
   const [dbErr, setDbErr] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [pickQuery, setPickQuery] = useState("");
 
-  const wsRate = (p) => {
-    const ws = config.perSku[p.code]?.ws ?? SKU_DEFAULTS.ws;
-    return Math.round(p.mrp * (1 - ws / 100) * 100) / 100;
-  };
-  const prodByCode = useMemo(() => { const m = {}; (products || []).forEach((p) => (m[p.code] = p)); return m; }, [products]);
+  const costOf = (code, mrp) => skuPricing(mrp, config.perSku[code] || {}, config.ourMargin).cost;
+  const wsRate = (p) => Math.round(p.mrp * (1 - (config.perSku[p.code]?.ws ?? SKU_DEFAULTS.ws) / 100) * 100) / 100;
+  const partyName = (id) => parties.find((x) => x.id === id)?.name || "—";
 
-  useEffect(() => {
-    if (!wh) return;
-    let alive = true;
-    (async () => {
-      try { const list = await kvGet(invoicesKey(wh)); if (alive) setInvoices(list || []); }
-      catch (e) { setDbErr(e.message || String(e)); if (alive) setInvoices([]); }
-    })();
-    return () => { alive = false; };
-  }, [wh]);
+  useEffect(() => { let a = true; (async () => {
+    try { const [pa, pay, cn] = await Promise.all([kvGet(K_PARTIES), kvGet(K_PAYMENTS), kvGet(K_CNOTES)]);
+      if (a) { setParties(pa || []); setPayments(pay || []); setCnotes(cn || []); } }
+    catch (e) { setDbErr(e.message || String(e)); }
+  })(); return () => { a = false; }; }, []);
+  useEffect(() => { if (!wh) return; let a = true; (async () => {
+    try { const [inv, so] = await Promise.all([kvGet(invoicesKey(wh)), kvGet(soKey(wh))]);
+      if (a) { setInvoices(inv || []); setSos(so || []); } }
+    catch (e) { setDbErr(e.message || String(e)); }
+  })(); return () => { a = false; }; }, [wh]);
 
-  const persist = async (list) => {
-    setInvoices(list);
-    try { await kvSet(invoicesKey(wh), list); setDbErr(null); }
-    catch (e) { setDbErr("Save failed: " + (e.message || e)); }
-  };
-
-  const nextNo = () => {
-    const nums = (invoices || []).map((i) => parseInt(String(i.no).replace(/\D/g, ""), 10) || 0);
-    return "INV-" + String((nums.length ? Math.max(...nums) : 0) + 1).padStart(4, "0");
-  };
-  const newInvoice = () => setEditing({ id: "inv_" + Date.now(), no: nextNo(), date: todayStr(), party: "", items: [], note: "", posted: null });
-  const editInvoice = (inv) => setEditing(JSON.parse(JSON.stringify(inv)));
-
-  const addLine = (p) => {
-    setEditing((e) => ({ ...e, items: [...e.items, { code: p.code, desc: p.desc, c: 0, b: 0, p: 0, rate: wsRate(p), pcsCase: p.pcsCase, pcsOuter: p.pcsOuter, mrp: p.mrp }] }));
-    setPickQuery("");
-  };
-  const setLine = (idx, field, val) => setEditing((e) => {
-    const items = e.items.slice(); items[idx] = { ...items[idx], [field]: val }; return { ...e, items };
-  });
-  const delLine = (idx) => setEditing((e) => ({ ...e, items: e.items.filter((_, i) => i !== idx) }));
+  const saveParties = (v) => { setParties(v); kvSet(K_PARTIES, v).catch((e) => setDbErr(String(e))); };
+  const savePayments = (v) => { setPayments(v); kvSet(K_PAYMENTS, v).catch((e) => setDbErr(String(e))); };
+  const saveCnotes = (v) => { setCnotes(v); kvSet(K_CNOTES, v).catch((e) => setDbErr(String(e))); };
+  const saveInvoices = async (v) => { setInvoices(v); await kvSet(invoicesKey(wh), v); };
+  const saveSos = async (v) => { setSos(v); await kvSet(soKey(wh), v); };
 
   const linePcs = (it) => toPcs(it.c, it.b, it.p, it.pcsCase, it.pcsOuter);
   const lineAmt = (it) => linePcs(it) * (Number(it.rate) || 0);
-  const invTotal = (inv) => (inv.items || []).reduce((a, it) => a + lineAmt(it), 0);
+  const marginPc = (it) => (Number(it.rate) || 0) - (it.cost || 0);
+  const docTotal = (d) => (d.items || []).reduce((a, it) => a + lineAmt(it), 0);
+  const nextNo = (list, pfx) => { const nums = (list || []).map((i) => parseInt(String(i.no).replace(/\D/g, ""), 10) || 0); return pfx + "-" + String((nums.length ? Math.max(...nums) : 0) + 1).padStart(4, "0"); };
 
-  const saveInvoice = async (inv) => {
-    const list = invoices.slice();
-    const i = list.findIndex((x) => x.id === inv.id);
-    if (i >= 0) list[i] = inv; else list.push(inv);
-    await persist(list);
+  const newInvoice = () => setEditing({ kind: "invoice", id: "inv_" + Date.now(), no: nextNo(invoices, "INV"), date: todayStr(), partyId: "", warehouse: wh, items: [], note: "", posted: null, soId: null });
+  const newSO = () => setEditing({ kind: "so", id: "so_" + Date.now(), no: nextNo(sos, "SO"), date: todayStr(), partyId: "", warehouse: wh, items: [], note: "", status: "open" });
+  const newReturn = () => setEditing({ kind: "return", id: "ret_" + Date.now(), no: nextNo(cnotes.filter((c) => c.type === "return"), "RET"), date: todayStr(), partyId: "", warehouse: wh, type: "return", items: [], note: "", posted: null });
+  const openDoc = (kind, doc) => setEditing({ kind, ...JSON.parse(JSON.stringify(doc)) });
+
+  const addLine = (p) => { setEditing((e) => ({ ...e, items: [...e.items, { code: p.code, desc: p.desc, c: 0, b: 0, p: 0, rate: wsRate(p), cost: costOf(p.code, p.mrp), mrp: p.mrp, pcsCase: p.pcsCase, pcsOuter: p.pcsOuter }] })); setPickQuery(""); };
+  const setLine = (i, f, v) => setEditing((e) => { const items = e.items.slice(); items[i] = { ...items[i], [f]: v }; return { ...e, items }; });
+  const delLine = (i) => setEditing((e) => ({ ...e, items: e.items.filter((_, x) => x !== i) }));
+
+  const psFiltered = useMemo(() => { const q = pickQuery.trim().toLowerCase(); if (!q) return [];
+    return (products || []).filter((p) => p.desc.toLowerCase().includes(q) || p.code.toLowerCase().includes(q)).slice(0, 8); }, [pickQuery, products]);
+
+  // adjust a warehouse-day's movement field by items (reverse prevItems first)
+  const postMovement = async (warehouse, date, field, items, prevItems) => {
+    const key = mvKey(warehouse, date);
+    const mv = (await kvGet(key)) || {};
+    const apply = (code, dc, db, dp) => { const row = { ...(mv[code] || {}) }; const cell = { ...(row[field] || { c: 0, b: 0, p: 0 }) }; cell.c += dc; cell.b += db; cell.p += dp; row[field] = cell; mv[code] = row; };
+    (prevItems || []).forEach((it) => apply(it.code, -it.c, -it.b, -it.p));
+    (items || []).forEach((it) => apply(it.code, it.c, it.b, it.p));
+    await kvSet(key, mv);
   };
+  const snapItems = (items) => items.map((it) => ({ code: it.code, c: it.c, b: it.b, p: it.p }));
 
-  // post the invoice's quantities into the day's Wholesale movement (auto stock-out)
-  const postToStock = async (inv) => {
+  // ---- invoice actions ----
+  const saveDraftInvoice = async (inv) => { const list = invoices.slice(); const i = list.findIndex((x) => x.id === inv.id); if (i >= 0) list[i] = inv; else list.push(inv); await saveInvoices(list); };
+  const postInvoice = async (inv) => {
     setBusy(true);
     try {
-      const locked = await kvGet(lockKey(wh, inv.date));
-      if (locked && !isAdmin) { alert(`${fmtDate(inv.date)} is locked. Ask an admin to reopen it before posting.`); setBusy(false); return; }
-      const key = mvKey(wh, inv.date);
-      const mv = (await kvGet(key)) || {};
-      const apply = (code, dc, db, dp) => {
-        const row = { ...(mv[code] || {}) };
-        const cell = { ...(row.whole || { c: 0, b: 0, p: 0 }) };
-        cell.c += dc; cell.b += db; cell.p += dp;
-        row.whole = cell; mv[code] = row;
-      };
-      (inv.posted?.items || []).forEach((it) => apply(it.code, -it.c, -it.b, -it.p)); // reverse prior post
-      inv.items.forEach((it) => apply(it.code, it.c, it.b, it.p));
-      await kvSet(key, mv);
-      const snap = inv.items.map((it) => ({ code: it.code, c: it.c, b: it.b, p: it.p }));
-      const updated = { ...inv, posted: { at: new Date().toISOString(), by: myEmail, items: snap } };
-      await saveInvoice(updated);
-      setEditing(null);
-      alert(`Invoice ${inv.no} posted — wholesale stock-out recorded on ${fmtDate(inv.date)}.`);
+      const locked = await kvGet(lockKey(inv.warehouse, inv.date));
+      if (locked && !isAdmin) { alert(`${fmtDate(inv.date)} is locked. Ask an admin to reopen it.`); setBusy(false); return; }
+      await postMovement(inv.warehouse, inv.date, "whole", inv.items, inv.posted?.items);
+      const updated = { ...inv, posted: { at: new Date().toISOString(), by: myEmail, items: snapItems(inv.items) } };
+      await saveDraftInvoice(updated); setEditing(null);
+      alert(`Invoice ${inv.no} posted — wholesale stock-out on ${fmtDate(inv.date)} (${inv.warehouse}).`);
     } catch (e) { setDbErr("Post failed: " + (e.message || e)); }
     setBusy(false);
   };
+  const unpostInvoice = async (inv) => { if (!inv.posted) return; if (!window.confirm(`Reverse stock-out for ${inv.no}?`)) return; setBusy(true);
+    try { await postMovement(inv.warehouse, inv.date, "whole", [], inv.posted.items); await saveDraftInvoice({ ...inv, posted: null }); setEditing((e) => e && { ...e, posted: null }); }
+    catch (e) { setDbErr(String(e)); } setBusy(false); };
+  const deleteInvoice = async (inv) => { if (!window.confirm(`Delete invoice ${inv.no}?`)) return; if (inv.posted) await postMovement(inv.warehouse, inv.date, "whole", [], inv.posted.items); await saveInvoices(invoices.filter((x) => x.id !== inv.id)); setEditing(null); };
 
-  const unpost = async (inv) => {
-    if (!inv.posted) return;
-    if (!window.confirm(`Reverse the stock-out for ${inv.no}?`)) return;
+  // ---- SO actions ----
+  const saveSO = async (so) => { const list = sos.slice(); const i = list.findIndex((x) => x.id === so.id); if (i >= 0) list[i] = so; else list.push(so); await saveSos(list); };
+  const soToInvoice = async (so) => {
+    await saveSO({ ...so, status: "invoiced" });
+    const inv = { kind: "invoice", id: "inv_" + Date.now(), no: nextNo(invoices, "INV"), date: todayStr(), partyId: so.partyId, warehouse: so.warehouse || wh, items: JSON.parse(JSON.stringify(so.items)), note: `From ${so.no}`, posted: null, soId: so.id };
+    const list = invoices.slice(); list.push(inv); await saveInvoices(list);
+    setEditing(inv);
+    setView("invoices");
+  };
+  const deleteSO = async (so) => { if (!window.confirm(`Delete ${so.no}?`)) return; await saveSos(sos.filter((x) => x.id !== so.id)); setEditing(null); };
+
+  // ---- return actions (post to Edit/Cancel = adds stock back, credits party) ----
+  const postReturn = async (ret) => {
     setBusy(true);
     try {
-      const key = mvKey(wh, inv.date);
-      const mv = (await kvGet(key)) || {};
-      inv.posted.items.forEach((it) => {
-        const row = { ...(mv[it.code] || {}) }; const cell = { ...(row.whole || { c: 0, b: 0, p: 0 }) };
-        cell.c -= it.c; cell.b -= it.b; cell.p -= it.p; row.whole = cell; mv[it.code] = row;
-      });
-      await kvSet(key, mv);
-      await saveInvoice({ ...inv, posted: null });
-    } catch (e) { setDbErr("Reverse failed: " + (e.message || e)); }
+      const locked = await kvGet(lockKey(ret.warehouse, ret.date));
+      if (locked && !isAdmin) { alert(`${fmtDate(ret.date)} is locked. Ask an admin to reopen it.`); setBusy(false); return; }
+      await postMovement(ret.warehouse, ret.date, "edit", ret.items, ret.posted?.items);
+      const updated = { ...ret, amount: docTotal(ret), posted: { at: new Date().toISOString(), by: myEmail, items: snapItems(ret.items) } };
+      const list = cnotes.slice(); const i = list.findIndex((x) => x.id === ret.id); if (i >= 0) list[i] = updated; else list.push(updated);
+      saveCnotes(list); setEditing(null);
+      alert(`Return ${ret.no} posted — stock added back via Edit/Cancel on ${fmtDate(ret.date)}.`);
+    } catch (e) { setDbErr("Post failed: " + (e.message || e)); }
+    setBusy(false);
+  };
+  const saveDraftReturn = (ret) => { const list = cnotes.slice(); const upd = { ...ret, amount: docTotal(ret) }; const i = list.findIndex((x) => x.id === ret.id); if (i >= 0) list[i] = upd; else list.push(upd); saveCnotes(list); };
+  const deleteCnote = async (cn) => { if (!window.confirm(`Delete ${cn.no || "credit note"}?`)) return; if (cn.type === "return" && cn.posted) await postMovement(cn.warehouse, cn.date, "edit", [], cn.posted.items); saveCnotes(cnotes.filter((x) => x.id !== cn.id)); setEditing(null); };
+
+  // ---- party ledger (across all warehouses) ----
+  const buildLedger = async (pid) => {
+    setBusy(true);
+    try {
+      let invAll = [];
+      for (const w of allowedWh) { const list = (await kvGet(invoicesKey(w))) || []; invAll = invAll.concat(list.filter((i) => i.partyId === pid).map((i) => ({ ...i, _w: w }))); }
+      const tx = [];
+      const p = parties.find((x) => x.id === pid);
+      if (p && Number(p.opening)) tx.push({ date: "0000-00-00", type: "Opening", ref: "", debit: p.opening > 0 ? p.opening : 0, credit: p.opening < 0 ? -p.opening : 0 });
+      invAll.forEach((i) => tx.push({ date: i.date, type: "Invoice", ref: `${i.no} · ${i._w}`, debit: docTotal(i), credit: 0 }));
+      payments.filter((x) => x.partyId === pid).forEach((x) => tx.push({ date: x.date, type: "Payment", ref: x.mode || "", debit: 0, credit: Number(x.amount) || 0 }));
+      cnotes.filter((x) => x.partyId === pid).forEach((x) => tx.push({ date: x.date, type: x.type === "return" ? "Return" : "Credit Note", ref: x.no || "", debit: 0, credit: x.type === "return" ? docTotal(x) : (Number(x.amount) || 0) }));
+      tx.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+      let bal = 0; tx.forEach((t) => { bal += t.debit - t.credit; t.balance = bal; });
+      setLedgerRows(tx);
+    } catch (e) { setDbErr(String(e)); }
     setBusy(false);
   };
 
-  const deleteInvoice = async (inv) => {
-    if (!window.confirm(`Delete invoice ${inv.no}?`)) return;
-    if (inv.posted) await unpost(inv);
-    await persist((invoices || []).filter((x) => x.id !== inv.id));
-    setEditing(null);
+  // ---- PDFs ----
+  const brandHead = (doc, W, heading) => {
+    doc.setFont("helvetica", "bold"); doc.setFontSize(16); doc.setTextColor(107, 31, 36); doc.text("KWALITY VENTURES", 14, 16);
+    doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(90, 74, 58); doc.text("Mondelez Distribution", 14, 21.5);
+    doc.setFont("helvetica", "bold"); doc.setFontSize(13); doc.setTextColor(42, 32, 24); doc.text(heading, W - 14, 16, { align: "right" });
   };
-
-  const invoicePDF = (inv) => {
-    const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
-    const W = doc.internal.pageSize.getWidth();
-    doc.setFont("helvetica", "bold"); doc.setFontSize(16); doc.setTextColor(107, 31, 36);
-    doc.text("KWALITY VENTURES", 14, 16);
+  const docPDF = (d, heading, prefix) => {
+    const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" }); const W = doc.internal.pageSize.getWidth();
+    brandHead(doc, W, heading);
     doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(90, 74, 58);
-    doc.text("Mondelez Distribution", 14, 21.5);
-    doc.text(wh, 14, 26);
-    doc.setFont("helvetica", "bold"); doc.setFontSize(13); doc.setTextColor(42, 32, 24);
-    doc.text("WHOLESALE INVOICE", W - 14, 16, { align: "right" });
-    doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(90, 74, 58);
-    doc.text(`No: ${inv.no}`, W - 14, 22, { align: "right" });
-    doc.text(`Date: ${fmtDate(inv.date)}`, W - 14, 26.5, { align: "right" });
-    doc.setDrawColor(210, 194, 168); doc.line(14, 30, W - 14, 30);
-    doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(42, 32, 24);
-    doc.text("Billed to:", 14, 37);
-    doc.setFont("helvetica", "normal"); doc.text(inv.party || "—", 30, 37);
-    const body = (inv.items || []).map((it, i) => [i + 1, it.desc, `${it.c}·${it.b}·${it.p}`, linePcs(it), (Number(it.rate) || 0).toFixed(2), "Rs " + Math.round(lineAmt(it)).toLocaleString("en-IN")]);
-    autoTable(doc, {
-      startY: 42,
-      head: [["#", "Product", "C·B·P", "Pcs", "Rate", "Amount"]],
-      body,
-      theme: "grid",
-      styles: { font: "helvetica", fontSize: 9, cellPadding: 1.6, textColor: [42, 32, 24], lineColor: [210, 194, 168] },
+    doc.text(`No: ${d.no}`, W - 14, 22, { align: "right" }); doc.text(`Date: ${fmtDate(d.date)}`, W - 14, 26.5, { align: "right" });
+    doc.text(`Warehouse: ${d.warehouse || wh}`, 14, 26);
+    doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(42, 32, 24); doc.text("Party:", 14, 33);
+    doc.setFont("helvetica", "normal"); doc.text(partyName(d.partyId), 26, 33);
+    const body = (d.items || []).map((it, i) => [i + 1, it.desc, `${it.c}·${it.b}·${it.p}`, linePcs(it), it.mrp, (it.cost || 0).toFixed(2), (Number(it.rate) || 0).toFixed(2), "Rs " + Math.round(lineAmt(it)).toLocaleString("en-IN")]);
+    autoTable(doc, { startY: 38, head: [["#", "Product", "C·B·P", "Pcs", "MRP", "Cost", "Rate", "Amount"]], body, theme: "grid",
+      styles: { font: "helvetica", fontSize: 8.5, cellPadding: 1.4, textColor: [42, 32, 24], lineColor: [210, 194, 168] },
       headStyles: { fillColor: [239, 230, 214], textColor: [91, 74, 58], fontStyle: "bold" },
-      columnStyles: { 0: { cellWidth: 10 }, 3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right", cellWidth: 30 } },
-    });
-    const y = doc.lastAutoTable.finalY + 8;
-    doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.setTextColor(42, 32, 24);
-    doc.text(`Total: Rs ${Math.round(invTotal(inv)).toLocaleString("en-IN")}`, W - 14, y, { align: "right" });
-    const H = doc.internal.pageSize.getHeight();
-    doc.setFont("helvetica", "normal"); doc.setFontSize(7.5); doc.setTextColor(150, 138, 114);
+      columnStyles: { 0: { cellWidth: 9 }, 3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" }, 6: { halign: "right" }, 7: { halign: "right", cellWidth: 28 } } });
+    const y = doc.lastAutoTable.finalY + 8; doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.setTextColor(42, 32, 24);
+    doc.text(`Total: Rs ${Math.round(docTotal(d)).toLocaleString("en-IN")}`, W - 14, y, { align: "right" });
+    const H = doc.internal.pageSize.getHeight(); doc.setFont("helvetica", "normal"); doc.setFontSize(7.5); doc.setTextColor(150, 138, 114);
     doc.text("An app by Jain Ankit and Co, Chartered Accountants", 14, H - 8);
-    doc.save(`Invoice_${inv.no}_${inv.date}.pdf`);
+    doc.save(`${prefix}_${d.no}_${d.date}.pdf`);
+  };
+  const ledgerPDF = () => {
+    if (!ledgerRows) return; const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" }); const W = doc.internal.pageSize.getWidth();
+    brandHead(doc, W, "PARTY LEDGER");
+    doc.setFont("helvetica", "normal"); doc.setFontSize(10); doc.setTextColor(42, 32, 24); doc.text(partyName(ledgerParty), 14, 26);
+    const body = ledgerRows.map((t) => [t.date === "0000-00-00" ? "Opening" : fmtDate(t.date), t.type, t.ref, t.debit ? Math.round(t.debit).toLocaleString("en-IN") : "", t.credit ? Math.round(t.credit).toLocaleString("en-IN") : "", Math.round(t.balance).toLocaleString("en-IN")]);
+    autoTable(doc, { startY: 32, head: [["Date", "Type", "Ref", "Debit", "Credit", "Balance"]], body, theme: "grid",
+      styles: { font: "helvetica", fontSize: 8.5, cellPadding: 1.4, lineColor: [210, 194, 168] }, headStyles: { fillColor: [239, 230, 214], textColor: [91, 74, 58], fontStyle: "bold" },
+      columnStyles: { 3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" } } });
+    const bal = ledgerRows.length ? ledgerRows[ledgerRows.length - 1].balance : 0;
+    const y = doc.lastAutoTable.finalY + 8; doc.setFont("helvetica", "bold"); doc.setFontSize(12);
+    doc.text(`Closing Balance: Rs ${Math.round(bal).toLocaleString("en-IN")} ${bal >= 0 ? "Dr" : "Cr"}`, W - 14, y, { align: "right" });
+    doc.save(`Ledger_${partyName(ledgerParty).replace(/[^\w]+/g, "_")}.pdf`);
   };
 
-  const psFiltered = useMemo(() => {
-    const q = pickQuery.trim().toLowerCase();
-    if (!q) return [];
-    return (products || []).filter((p) => p.desc.toLowerCase().includes(q) || p.code.toLowerCase().includes(q)).slice(0, 8);
-  }, [pickQuery, products]);
+  const TABS = [["invoices", "Invoices"], ["so", "Sales Orders"], ["payments", "Payments"], ["credit", "Credit / Returns"], ["ledger", "Party Ledger"], ["parties", "Parties"]];
+
+  // ---- shared line-item editor (invoice / so / return) ----
+  const LineEditor = () => (
+    <>
+      <div className="addpanel" style={{ margin: "0 18px 12px" }}>
+        <div className="aprow">
+          <label>No.<input value={editing.no} onChange={(e) => setEditing({ ...editing, no: e.target.value })} /></label>
+          <label>Date<input type="date" value={editing.date} onChange={(e) => setEditing({ ...editing, date: e.target.value })} style={{ width: 140 }} /></label>
+          <label>Warehouse
+            <select value={editing.warehouse} onChange={(e) => setEditing({ ...editing, warehouse: e.target.value })} style={{ padding: "7px 9px", borderRadius: 6, border: "1px solid #d2c2a8", background: "#fffdf8" }}>
+              {allowedWh.map((w) => <option key={w}>{w}</option>)}
+            </select>
+          </label>
+          <label className="wide">Party
+            <select value={editing.partyId} onChange={(e) => setEditing({ ...editing, partyId: e.target.value })} style={{ padding: "7px 9px", borderRadius: 6, border: "1px solid #d2c2a8", background: "#fffdf8" }}>
+              <option value="">— select party —</option>
+              {parties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </label>
+        </div>
+      </div>
+      <div className="toolbar" style={{ paddingTop: 0 }}>
+        <div style={{ position: "relative" }}>
+          <input className="search" style={{ minWidth: 300 }} placeholder="Add item — search product or code…" value={pickQuery} onChange={(e) => setPickQuery(e.target.value)} />
+          {psFiltered.length > 0 && (
+            <div className="hfpop" style={{ left: 0, right: "auto", width: 340, top: "100%" }}>
+              {psFiltered.map((p) => <div key={p.code} className="hfitem" onClick={() => addLine(p)}><span className="mono" style={{ fontSize: 11, color: "#6b5a45", minWidth: 60 }}>{p.code}</span> {p.desc}</div>)}
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="gridwrap" style={{ maxHeight: "none" }}>
+        <table className="grid">
+          <thead><tr>
+            <th className="stick code">Code</th><th className="stick desc">Product</th>
+            <th className="num">MRP</th><th>Case</th><th>Box</th><th>Pcs</th><th className="num">Tot Pcs</th>
+            <th className="num">Our Cost</th><th className="num">Rate</th><th className="num">Margin/Pc</th><th className="num">Amount</th><th></th>
+          </tr></thead>
+          <tbody>
+            {editing.items.map((it, idx) => (
+              <tr key={idx}>
+                <td className="stick code mono">{it.code}</td>
+                <td className="stick desc">{it.desc}</td>
+                <td className="num dim">{it.mrp}</td>
+                <td className="inp"><NumCell value={it.c} onChange={(v) => setLine(idx, "c", v)} /></td>
+                <td className="inp"><NumCell value={it.b} onChange={(v) => setLine(idx, "b", v)} /></td>
+                <td className="inp"><NumCell value={it.p} onChange={(v) => setLine(idx, "p", v)} /></td>
+                <td className="num">{linePcs(it)}</td>
+                <td className="num dim">{(it.cost || 0).toFixed(2)}</td>
+                <td className="inp"><DecCell value={it.rate} onChange={(v) => setLine(idx, "rate", v)} /></td>
+                <td className={"num " + (marginPc(it) < 0 ? "negtxt" : "oktxt")}>{marginPc(it).toFixed(2)}</td>
+                <td className="num">{inr(lineAmt(it))}</td>
+                <td className="inp"><button className="unct del" onClick={() => delLine(idx)}>✕</button></td>
+              </tr>
+            ))}
+            {editing.items.length === 0 && <tr><td colSpan={12} className="dim" style={{ padding: 14 }}>Search above to add items. Rate auto-fills from each product's WS%; MRP, Our Cost and Margin are shown.</td></tr>}
+          </tbody>
+          {editing.items.length > 0 && <tfoot><tr className="trow">
+            <td className="stick code">TOTAL</td><td className="stick desc">{editing.items.length} items</td>
+            <td></td><td></td><td></td><td></td><td className="num">{editing.items.reduce((a, it) => a + linePcs(it), 0)}</td>
+            <td></td><td></td><td></td><td className="num">{inr(docTotal(editing))}</td><td></td>
+          </tr></tfoot>}
+        </table>
+      </div>
+    </>
+  );
 
   return (
     <div className="wrap">
@@ -777,15 +873,10 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
       <div className="topbar">
         <div className="brand">
           <div className="logo" aria-label="Anchor">⚓</div>
-          <div>
-            <div className="title">ANCHOR · INVOICING</div>
-            <div className="sub">Kwality Ventures · Wholesale</div>
-          </div>
+          <div><div className="title">ANCHOR · INVOICING</div><div className="sub">Kwality Ventures · Wholesale</div></div>
         </div>
         <div className="controls">
-          <select className="whsel" value={wh} onChange={(e) => setWh(e.target.value)} title="Warehouse">
-            {allowedWh.map((w) => <option key={w}>{w}</option>)}
-          </select>
+          <select className="whsel" value={wh} onChange={(e) => setWh(e.target.value)} title="Warehouse">{allowedWh.map((w) => <option key={w}>{w}</option>)}</select>
           <span className="sep" />
           <button className="ghost" onClick={onSwitchModule}>⇄ Modules</button>
           <button className="ghost" onClick={signOut}>{myEmail.split("@")[0]} ⏻</button>
@@ -793,37 +884,8 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
       </div>
 
       {!editing && (
-        <div className="report">
-          <div className="toolbar">
-            <div className="ptitle" style={{ margin: 0, fontSize: 13, color: "#2a2018", fontWeight: 700 }}>Wholesale Invoices — {wh}</div>
-            <div className="spacer" />
-            <button className="save" onClick={newInvoice}>＋ New Invoice</button>
-          </div>
-          <div className="gridwrap" style={{ maxHeight: "none" }}>
-            <table className="grid">
-              <thead><tr>
-                <th className="stick code">No.</th><th className="stick desc">Party</th>
-                <th>Date</th><th className="num">Items</th><th className="num">Total</th><th>Status</th><th></th>
-              </tr></thead>
-              <tbody>
-                {(invoices || []).slice().reverse().map((inv) => (
-                  <tr key={inv.id}>
-                    <td className="stick code mono">{inv.no}</td>
-                    <td className="stick desc">{inv.party || "—"}</td>
-                    <td>{fmtDate(inv.date)}</td>
-                    <td className="num">{inv.items.length}</td>
-                    <td className="num">{inr(invTotal(inv))}</td>
-                    <td>{inv.posted ? <span className="oktxt">✓ posted</span> : <span className="dim">draft</span>}</td>
-                    <td className="inp" style={{ whiteSpace: "nowrap" }}>
-                      <button className="unct" onClick={() => editInvoice(inv)}>Open</button>
-                      <button className="unct" style={{ marginLeft: 6 }} onClick={() => invoicePDF(inv)}>📄 PDF</button>
-                    </td>
-                  </tr>
-                ))}
-                {invoices && invoices.length === 0 && <tr><td colSpan={7} className="dim" style={{ padding: 16 }}>No invoices yet. Click "New Invoice".</td></tr>}
-              </tbody>
-            </table>
-          </div>
+        <div className="tabs">
+          {TABS.map(([k, l]) => <button key={k} className={view === k ? "tab on" : "tab"} onClick={() => setView(k)}>{l}</button>)}
         </div>
       )}
 
@@ -831,78 +893,168 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
         <div className="report">
           <div className="toolbar">
             <button className="ghost2" onClick={() => setEditing(null)}>← Back</button>
-            <div className="ptitle" style={{ margin: 0, fontSize: 14, color: "#2a2018", fontWeight: 700 }}>{editing.no}</div>
-            {editing.posted && <span className="oktxt" style={{ fontSize: 12 }}>✓ posted to stock ({fmtDate(editing.date)})</span>}
+            <div className="ptitle" style={{ margin: 0, fontSize: 14, color: "#2a2018", fontWeight: 700 }}>{editing.no} <span className="dim" style={{ fontWeight: 400 }}>· {editing.kind === "so" ? "Sales Order" : editing.kind === "return" ? "Return" : "Invoice"}</span></div>
+            {editing.posted && <span className="oktxt" style={{ fontSize: 12 }}>✓ posted ({fmtDate(editing.date)})</span>}
             <div className="spacer" />
-            <button className="ghost2" onClick={() => invoicePDF(editing)}>📄 PDF</button>
-            {isAdmin && <button className="unct del" onClick={() => deleteInvoice(editing)}>🗑 Delete</button>}
+            <button className="ghost2" onClick={() => docPDF(editing, editing.kind === "so" ? "SALES ORDER" : editing.kind === "return" ? "RETURN NOTE" : "WHOLESALE INVOICE", editing.kind === "so" ? "SO" : editing.kind === "return" ? "Return" : "Invoice")}>📄 PDF</button>
+            {isAdmin && <button className="unct del" onClick={() => editing.kind === "so" ? deleteSO(editing) : editing.kind === "return" ? deleteCnote(editing) : deleteInvoice(editing)}>🗑 Delete</button>}
           </div>
-
-          <div className="addpanel" style={{ margin: "0 18px 12px" }}>
-            <div className="aprow">
-              <label>Invoice No<input value={editing.no} onChange={(e) => setEditing({ ...editing, no: e.target.value })} /></label>
-              <label>Date<input type="date" value={editing.date} onChange={(e) => setEditing({ ...editing, date: e.target.value })} style={{ width: 140 }} /></label>
-              <label className="wide">Wholesaler / Party<input value={editing.party} onChange={(e) => setEditing({ ...editing, party: e.target.value })} placeholder="Party name" /></label>
-            </div>
-          </div>
-
-          <div className="toolbar" style={{ paddingTop: 0 }}>
-            <div style={{ position: "relative" }}>
-              <input className="search" style={{ minWidth: 280 }} placeholder="Add item — search product or code…" value={pickQuery} onChange={(e) => setPickQuery(e.target.value)} />
-              {psFiltered.length > 0 && (
-                <div className="hfpop" style={{ left: 0, right: "auto", width: 320, top: "100%" }}>
-                  {psFiltered.map((p) => (
-                    <div key={p.code} className="hfitem" onClick={() => addLine(p)}>
-                      <span className="mono" style={{ fontSize: 11, color: "#6b5a45", minWidth: 60 }}>{p.code}</span> {p.desc}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="gridwrap" style={{ maxHeight: "none" }}>
-            <table className="grid">
-              <thead><tr>
-                <th className="stick code">Code</th><th className="stick desc">Product</th>
-                <th>Case</th><th>Box</th><th>Pcs</th><th className="num">Total Pcs</th>
-                <th className="num">Rate (WS)</th><th className="num">Amount</th><th></th>
-              </tr></thead>
-              <tbody>
-                {editing.items.map((it, idx) => (
-                  <tr key={idx}>
-                    <td className="stick code mono">{it.code}</td>
-                    <td className="stick desc">{it.desc}</td>
-                    <td className="inp"><NumCell value={it.c} onChange={(v) => setLine(idx, "c", v)} /></td>
-                    <td className="inp"><NumCell value={it.b} onChange={(v) => setLine(idx, "b", v)} /></td>
-                    <td className="inp"><NumCell value={it.p} onChange={(v) => setLine(idx, "p", v)} /></td>
-                    <td className="num">{linePcs(it)}</td>
-                    <td className="inp"><DecCell value={it.rate} onChange={(v) => setLine(idx, "rate", v)} /></td>
-                    <td className="num">{inr(lineAmt(it))}</td>
-                    <td className="inp"><button className="unct del" onClick={() => delLine(idx)}>✕</button></td>
-                  </tr>
-                ))}
-                {editing.items.length === 0 && <tr><td colSpan={9} className="dim" style={{ padding: 14 }}>Search above to add items. Rate auto-fills from each product's WS% and is editable.</td></tr>}
-              </tbody>
-              {editing.items.length > 0 && <tfoot><tr className="trow">
-                <td className="stick code">TOTAL</td><td className="stick desc">{editing.items.length} items</td>
-                <td></td><td></td><td></td><td className="num">{editing.items.reduce((a, it) => a + linePcs(it), 0)}</td>
-                <td></td><td className="num">{inr(invTotal(editing))}</td><td></td>
-              </tr></tfoot>}
-            </table>
-          </div>
-
+          <LineEditor />
           <div className="footbar">
-            <div className="dim">Posting records a Wholesale stock-out on {fmtDate(editing.date)} against this invoice.</div>
+            <div className="dim">
+              {editing.kind === "invoice" && `Posting records a Wholesale stock-out on ${fmtDate(editing.date)} in ${editing.warehouse}.`}
+              {editing.kind === "return" && `Posting adds stock back via Edit/Cancel on ${fmtDate(editing.date)} in ${editing.warehouse}, and credits the party.`}
+              {editing.kind === "so" && `Sales order — no stock impact until converted to an invoice.`}
+            </div>
             <div style={{ display: "flex", gap: 10 }}>
-              <button className="ghost2" onClick={() => saveInvoice(editing).then(() => alert("Saved as draft."))} disabled={busy}>Save draft</button>
-              {editing.posted && <button className="ghost2" onClick={() => unpost(editing)} disabled={busy}>Reverse post</button>}
-              <button className="save" onClick={() => postToStock(editing)} disabled={busy || editing.items.length === 0}>{busy ? "…" : editing.posted ? "Re-post to stock" : "Post to stock (Wholesale out)"}</button>
+              {editing.kind === "invoice" && <>
+                <button className="ghost2" onClick={() => saveDraftInvoice(editing).then(() => alert("Saved."))} disabled={busy}>Save draft</button>
+                {editing.posted && <button className="ghost2" onClick={() => unpostInvoice(editing)} disabled={busy}>Reverse post</button>}
+                <button className="save" onClick={() => postInvoice(editing)} disabled={busy || !editing.partyId || editing.items.length === 0}>{busy ? "…" : editing.posted ? "Re-post" : "Post to stock (WS out)"}</button>
+              </>}
+              {editing.kind === "so" && <>
+                <button className="ghost2" onClick={() => saveSO(editing).then(() => alert("Saved."))} disabled={busy}>Save</button>
+                <button className="save" onClick={() => soToInvoice(editing)} disabled={busy || !editing.partyId || editing.items.length === 0}>→ Create Invoice</button>
+              </>}
+              {editing.kind === "return" && <>
+                <button className="ghost2" onClick={() => { saveDraftReturn(editing); alert("Saved."); }} disabled={busy}>Save draft</button>
+                <button className="save" onClick={() => postReturn(editing)} disabled={busy || !editing.partyId || editing.items.length === 0}>{busy ? "…" : editing.posted ? "Re-post" : "Post return (stock in via Edit)"}</button>
+              </>}
             </div>
           </div>
         </div>
       )}
+
+      {!editing && view === "invoices" && (
+        <div className="report">
+          <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Invoices — {wh}</div><div className="spacer" /><button className="save" onClick={newInvoice}>＋ New Invoice</button></div>
+          <ListTable rows={invoices} cols={["No.", "Party", "Date", "Items", "Total", "Status"]}
+            render={(inv) => [inv.no, partyName(inv.partyId), fmtDate(inv.date), inv.items.length, inr(docTotal(inv)), inv.posted ? <span className="oktxt">✓ posted</span> : <span className="dim">draft</span>]}
+            onOpen={(inv) => openDoc("invoice", inv)} onPDF={(inv) => docPDF(inv, "WHOLESALE INVOICE", "Invoice")} />
+        </div>
+      )}
+      {!editing && view === "so" && (
+        <div className="report">
+          <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Sales Orders — {wh}</div><div className="spacer" /><button className="save" onClick={newSO}>＋ New Sales Order</button></div>
+          <ListTable rows={sos} cols={["No.", "Party", "Date", "Items", "Value", "Status"]}
+            render={(so) => [so.no, partyName(so.partyId), fmtDate(so.date), so.items.length, inr(docTotal(so)), so.status === "invoiced" ? <span className="oktxt">invoiced</span> : <span className="dim">open</span>]}
+            onOpen={(so) => openDoc("so", so)} onPDF={(so) => docPDF(so, "SALES ORDER", "SO")} />
+        </div>
+      )}
+      {!editing && view === "payments" && (
+        <div className="report">
+          <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Payments Received</div><div className="spacer" /><button className="save" onClick={() => setPayForm({ id: "pay_" + Date.now(), date: todayStr(), partyId: "", amount: "", mode: "Cash", note: "" })}>＋ Record Payment</button></div>
+          {payForm && (
+            <div className="addpanel"><div className="aprow">
+              <label>Date<input type="date" value={payForm.date} onChange={(e) => setPayForm({ ...payForm, date: e.target.value })} style={{ width: 140 }} /></label>
+              <label className="wide">Party<select value={payForm.partyId} onChange={(e) => setPayForm({ ...payForm, partyId: e.target.value })} style={{ padding: "7px 9px", borderRadius: 6, border: "1px solid #d2c2a8", background: "#fffdf8" }}><option value="">— select —</option>{parties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
+              <label>Amount<input value={payForm.amount} inputMode="decimal" onChange={(e) => setPayForm({ ...payForm, amount: e.target.value })} /></label>
+              <label>Mode<input value={payForm.mode} onChange={(e) => setPayForm({ ...payForm, mode: e.target.value })} /></label>
+              <label className="wide">Note<input value={payForm.note} onChange={(e) => setPayForm({ ...payForm, note: e.target.value })} /></label>
+              <button className="save" onClick={() => { if (!payForm.partyId || !(Number(payForm.amount) > 0)) { alert("Pick party and amount."); return; } savePayments([...payments, { ...payForm, amount: Number(payForm.amount) }]); setPayForm(null); }}>Save</button>
+              <button className="ghost2" onClick={() => setPayForm(null)}>Cancel</button>
+            </div></div>
+          )}
+          <ListTable rows={payments} cols={["Date", "Party", "Amount", "Mode", "Note"]}
+            render={(x) => [fmtDate(x.date), partyName(x.partyId), inr(x.amount), x.mode, x.note]}
+            onDelete={isAdmin ? (x) => { if (window.confirm("Delete payment?")) savePayments(payments.filter((y) => y.id !== x.id)); } : null} />
+        </div>
+      )}
+      {!editing && view === "credit" && (
+        <div className="report">
+          <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Credit Notes & Returns</div><div className="spacer" />
+            <button className="ghost2" onClick={() => setCreditForm({ id: "cn_" + Date.now(), no: nextNo(cnotes.filter((c) => c.type === "credit"), "CN"), date: todayStr(), partyId: "", type: "credit", amount: "", note: "" })}>＋ Credit Note</button>
+            <button className="save" onClick={newReturn}>＋ Return (stock back)</button>
+          </div>
+          {creditForm && (
+            <div className="addpanel"><div className="aprow">
+              <label>No.<input value={creditForm.no} onChange={(e) => setCreditForm({ ...creditForm, no: e.target.value })} /></label>
+              <label>Date<input type="date" value={creditForm.date} onChange={(e) => setCreditForm({ ...creditForm, date: e.target.value })} style={{ width: 140 }} /></label>
+              <label className="wide">Party<select value={creditForm.partyId} onChange={(e) => setCreditForm({ ...creditForm, partyId: e.target.value })} style={{ padding: "7px 9px", borderRadius: 6, border: "1px solid #d2c2a8", background: "#fffdf8" }}><option value="">— select —</option>{parties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
+              <label>Amount<input value={creditForm.amount} inputMode="decimal" onChange={(e) => setCreditForm({ ...creditForm, amount: e.target.value })} /></label>
+              <label className="wide">Reason<input value={creditForm.note} onChange={(e) => setCreditForm({ ...creditForm, note: e.target.value })} /></label>
+              <button className="save" onClick={() => { if (!creditForm.partyId || !(Number(creditForm.amount) > 0)) { alert("Pick party and amount."); return; } saveCnotes([...cnotes, { ...creditForm, amount: Number(creditForm.amount) }]); setCreditForm(null); }}>Save</button>
+              <button className="ghost2" onClick={() => setCreditForm(null)}>Cancel</button>
+            </div></div>
+          )}
+          <ListTable rows={cnotes} cols={["No.", "Party", "Date", "Type", "Amount", "Status"]}
+            render={(x) => [x.no, partyName(x.partyId), fmtDate(x.date), x.type === "return" ? "Return" : "Credit Note", inr(x.type === "return" ? docTotal(x) : x.amount), x.type === "return" ? (x.posted ? <span className="oktxt">✓ posted</span> : <span className="dim">draft</span>) : "—"]}
+            onOpen={(x) => x.type === "return" ? openDoc("return", x) : setCreditForm(x)} onDelete={isAdmin ? deleteCnote : null} />
+        </div>
+      )}
+      {!editing && view === "ledger" && (
+        <div className="report">
+          <div className="toolbar">
+            <div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Party Ledger</div>
+            <select value={ledgerParty} onChange={(e) => { setLedgerParty(e.target.value); setLedgerRows(null); if (e.target.value) buildLedger(e.target.value); }} style={{ padding: "7px 10px", borderRadius: 7, border: "1px solid #d2c2a8", background: "#fff", fontSize: 13, minWidth: 220 }}>
+              <option value="">— select party —</option>{parties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+            <div className="spacer" />
+            {ledgerRows && <button className="ghost2" onClick={ledgerPDF}>📄 PDF</button>}
+          </div>
+          {busy && <div className="hint">Loading…</div>}
+          {ledgerRows && (
+            <div className="gridwrap" style={{ maxHeight: "none" }}>
+              <table className="grid">
+                <thead><tr><th>Date</th><th>Type</th><th className="stick desc" style={{ left: 0 }}>Reference</th><th className="num">Debit</th><th className="num">Credit</th><th className="num">Balance</th></tr></thead>
+                <tbody>
+                  {ledgerRows.map((t, i) => (
+                    <tr key={i}>
+                      <td>{t.date === "0000-00-00" ? "Opening" : fmtDate(t.date)}</td><td>{t.type}</td><td className="stick desc" style={{ left: 0 }}>{t.ref}</td>
+                      <td className="num">{t.debit ? inr(t.debit) : ""}</td><td className="num">{t.credit ? inr(t.credit) : ""}</td>
+                      <td className="num"><b>{inr(Math.abs(t.balance))} {t.balance >= 0 ? "Dr" : "Cr"}</b></td>
+                    </tr>
+                  ))}
+                  {ledgerRows.length === 0 && <tr><td colSpan={6} className="dim" style={{ padding: 14 }}>No transactions for this party.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+      {!editing && view === "parties" && (
+        <div className="report">
+          <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Wholesalers / Parties</div><div className="spacer" /><button className="save" onClick={() => setPartyForm({ id: "pty_" + Date.now(), name: "", phone: "", opening: "" })}>＋ Add Party</button></div>
+          {partyForm && (
+            <div className="addpanel"><div className="aprow">
+              <label className="wide">Name<input value={partyForm.name} onChange={(e) => setPartyForm({ ...partyForm, name: e.target.value })} /></label>
+              <label>Phone<input value={partyForm.phone} onChange={(e) => setPartyForm({ ...partyForm, phone: e.target.value })} /></label>
+              <label>Opening Bal (Dr+)<input value={partyForm.opening} inputMode="decimal" onChange={(e) => setPartyForm({ ...partyForm, opening: e.target.value })} /></label>
+              <button className="save" onClick={() => { if (!partyForm.name.trim()) { alert("Name required."); return; } const rec = { ...partyForm, name: partyForm.name.trim(), opening: Number(partyForm.opening) || 0 }; const list = parties.slice(); const i = list.findIndex((x) => x.id === rec.id); if (i >= 0) list[i] = rec; else list.push(rec); saveParties(list); setPartyForm(null); }}>Save</button>
+              <button className="ghost2" onClick={() => setPartyForm(null)}>Cancel</button>
+            </div></div>
+          )}
+          <ListTable rows={parties} cols={["Name", "Phone", "Opening Bal"]}
+            render={(p) => [p.name, p.phone || "—", p.opening ? inr(p.opening) : "0"]}
+            onOpen={(p) => setPartyForm({ ...p, opening: p.opening || "" })} onDelete={isAdmin ? (p) => { if (window.confirm(`Delete ${p.name}?`)) saveParties(parties.filter((x) => x.id !== p.id)); } : null} />
+        </div>
+      )}
+
       <div className="credit">An app by Jain Ankit and Co, Chartered Accountants</div>
+    </div>
+  );
+}
+
+// generic list table for the invoicing module
+function ListTable({ rows, cols, render, onOpen, onPDF, onDelete }) {
+  return (
+    <div className="gridwrap" style={{ maxHeight: "none" }}>
+      <table className="grid">
+        <thead><tr>{cols.map((c, i) => <th key={i} className={i === 0 ? "stick code" : (i === 1 ? "stick desc" : "")}>{c}</th>)}<th></th></tr></thead>
+        <tbody>
+          {(rows || []).slice().reverse().map((r, ri) => (
+            <tr key={r.id || ri}>
+              {render(r).map((cell, i) => <td key={i} className={i === 0 ? "stick code mono" : (i === 1 ? "stick desc" : "num")}>{cell}</td>)}
+              <td className="inp" style={{ whiteSpace: "nowrap" }}>
+                {onOpen && <button className="unct" onClick={() => onOpen(r)}>Open</button>}
+                {onPDF && <button className="unct" style={{ marginLeft: 6 }} onClick={() => onPDF(r)}>📄</button>}
+                {onDelete && <button className="unct del" style={{ marginLeft: 6 }} onClick={() => onDelete(r)}>✕</button>}
+              </td>
+            </tr>
+          ))}
+          {rows && rows.length === 0 && <tr><td colSpan={cols.length + 1} className="dim" style={{ padding: 16 }}>Nothing here yet.</td></tr>}
+        </tbody>
+      </table>
     </div>
   );
 }
