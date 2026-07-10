@@ -638,6 +638,7 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
   const [ledgerParty, setLedgerParty] = useState("");
   const [ledgerRows, setLedgerRows] = useState(null);
   const [payForm, setPayForm] = useState(null);    // add-payment form
+  const [payPending, setPayPending] = useState([]); // pending invoices for the chosen party
   const [creditForm, setCreditForm] = useState(null); // add credit-note form
   const [partyForm, setPartyForm] = useState(null);
   const [dbErr, setDbErr] = useState(null);
@@ -679,8 +680,19 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
   const setLine = (i, f, v) => setEditing((e) => { const items = e.items.slice(); items[i] = { ...items[i], [f]: v }; return { ...e, items }; });
   const delLine = (i) => setEditing((e) => ({ ...e, items: e.items.filter((_, x) => x !== i) }));
 
-  const psFiltered = useMemo(() => { const q = pickQuery.trim().toLowerCase(); if (!q) return [];
-    return (products || []).filter((p) => p.desc.toLowerCase().includes(q) || p.code.toLowerCase().includes(q)).slice(0, 8); }, [pickQuery, products]);
+  const dPickQuery = useDeferredValue(pickQuery);
+  const psFiltered = useMemo(() => { const q = dPickQuery.trim().toLowerCase(); if (!q) return [];
+    return (products || []).filter((p) => p.desc.toLowerCase().includes(q) || p.code.toLowerCase().includes(q)).slice(0, 8); }, [dPickQuery, products]);
+  // amount paid against an invoice, and its outstanding balance
+  const paidFor = (invId) => payments.filter((p) => p.invoiceId === invId).reduce((a, p) => a + (Number(p.amount) || 0), 0);
+  // pending (not fully paid) invoices for a party, across all warehouses
+  const loadPending = async (pid) => {
+    if (!pid) { setPayPending([]); return; }
+    let list = [];
+    for (const w of allowedWh) { const inv = (await kvGet(invoicesKey(w))) || []; list = list.concat(inv.filter((i) => i.partyId === pid).map((i) => ({ ...i, _w: w }))); }
+    const pend = list.map((i) => ({ ...i, _bal: (i.items || []).reduce((a, it) => a + toPcs(it.c, it.b, it.p, it.pcsCase, it.pcsOuter) * (Number(it.rate) || 0), 0) - paidFor(i.id) })).filter((i) => i._bal > 0.01);
+    setPayPending(pend);
+  };
 
   // adjust a warehouse-day's movement field by items (reverse prevItems first)
   const postMovement = async (warehouse, date, field, items, prevItems) => {
@@ -716,10 +728,12 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
   const saveSO = async (so) => { const list = sos.slice(); const i = list.findIndex((x) => x.id === so.id); if (i >= 0) list[i] = so; else list.push(so); await saveSos(list); };
   const soToInvoice = async (so) => {
     await saveSO({ ...so, status: "invoiced" });
-    const inv = { kind: "invoice", id: "inv_" + Date.now(), no: nextNo(invoices, "INV"), date: todayStr(), partyId: so.partyId, warehouse: so.warehouse || wh, items: JSON.parse(JSON.stringify(so.items)), note: `From ${so.no}`, posted: null, soId: so.id };
+    // rebuild each line with fresh WS rate + cost (SO never exposed pricing)
+    const items = (so.items || []).map((it) => ({ ...it, rate: wsRate(prodByCode[it.code] || { mrp: it.mrp, code: it.code }), cost: costOf(it.code, it.mrp) }));
+    const inv = { kind: "invoice", id: "inv_" + Date.now(), no: nextNo(invoices, "INV"), date: todayStr(), partyId: so.partyId, warehouse: so.warehouse || wh, items, note: `From ${so.no}`, posted: null, soId: so.id };
     const list = invoices.slice(); list.push(inv); await saveInvoices(list);
-    setEditing(inv);
     setView("invoices");
+    setEditing(inv);
   };
   const deleteSO = async (so) => { if (!window.confirm(`Delete ${so.no}?`)) return; await saveSos(sos.filter((x) => x.id !== so.id)); setEditing(null); };
 
@@ -765,7 +779,7 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
     doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(90, 74, 58); doc.text("Mondelez Distribution", 14, 21.5);
     doc.setFont("helvetica", "bold"); doc.setFontSize(13); doc.setTextColor(42, 32, 24); doc.text(heading, W - 14, 16, { align: "right" });
   };
-  const docPDF = (d, heading, prefix) => {
+  const docPDF = (d, heading, prefix, showPricing = true) => {
     const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" }); const W = doc.internal.pageSize.getWidth();
     brandHead(doc, W, heading);
     doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(90, 74, 58);
@@ -773,13 +787,21 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
     doc.text(`Warehouse: ${d.warehouse || wh}`, 14, 26);
     doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(42, 32, 24); doc.text("Party:", 14, 33);
     doc.setFont("helvetica", "normal"); doc.text(partyName(d.partyId), 26, 33);
-    const body = (d.items || []).map((it, i) => [i + 1, it.desc, `${it.c}·${it.b}·${it.p}`, linePcs(it), it.mrp, (it.cost || 0).toFixed(2), (Number(it.rate) || 0).toFixed(2), "Rs " + Math.round(lineAmt(it)).toLocaleString("en-IN")]);
-    autoTable(doc, { startY: 38, head: [["#", "Product", "C·B·P", "Pcs", "MRP", "Cost", "Rate", "Amount"]], body, theme: "grid",
+    let head, body, colStyles;
+    if (showPricing) {
+      head = [["#", "Product", "C·B·P", "Pcs", "MRP", "Cost", "Rate", "Amount"]];
+      body = (d.items || []).map((it, i) => [i + 1, it.desc, `${it.c}·${it.b}·${it.p}`, linePcs(it), it.mrp, (it.cost || 0).toFixed(2), (Number(it.rate) || 0).toFixed(2), "Rs " + Math.round(lineAmt(it)).toLocaleString("en-IN")]);
+      colStyles = { 0: { cellWidth: 9 }, 3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" }, 6: { halign: "right" }, 7: { halign: "right", cellWidth: 28 } };
+    } else {
+      head = [["#", "Product", "MRP", "Case", "Box", "Pcs", "Total Pcs"]];
+      body = (d.items || []).map((it, i) => [i + 1, it.desc, it.mrp, it.c, it.b, it.p, linePcs(it)]);
+      colStyles = { 0: { cellWidth: 9 }, 2: { halign: "right" }, 3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" }, 6: { halign: "right" } };
+    }
+    autoTable(doc, { startY: 38, head, body, theme: "grid",
       styles: { font: "helvetica", fontSize: 8.5, cellPadding: 1.4, textColor: [42, 32, 24], lineColor: [210, 194, 168] },
-      headStyles: { fillColor: [239, 230, 214], textColor: [91, 74, 58], fontStyle: "bold" },
-      columnStyles: { 0: { cellWidth: 9 }, 3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" }, 6: { halign: "right" }, 7: { halign: "right", cellWidth: 28 } } });
-    const y = doc.lastAutoTable.finalY + 8; doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.setTextColor(42, 32, 24);
-    doc.text(`Total: Rs ${Math.round(docTotal(d)).toLocaleString("en-IN")}`, W - 14, y, { align: "right" });
+      headStyles: { fillColor: [239, 230, 214], textColor: [91, 74, 58], fontStyle: "bold" }, columnStyles: colStyles });
+    const y = doc.lastAutoTable.finalY + 8;
+    if (showPricing) { doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.setTextColor(42, 32, 24); doc.text(`Total: Rs ${Math.round(docTotal(d)).toLocaleString("en-IN")}`, W - 14, y, { align: "right" }); }
     const H = doc.internal.pageSize.getHeight(); doc.setFont("helvetica", "normal"); doc.setFontSize(7.5); doc.setTextColor(150, 138, 114);
     doc.text("An app by Jain Ankit and Co, Chartered Accountants", 14, H - 8);
     doc.save(`${prefix}_${d.no}_${d.date}.pdf`);
@@ -801,7 +823,9 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
   const TABS = [["invoices", "Invoices"], ["so", "Sales Orders"], ["payments", "Payments"], ["credit", "Credit / Returns"], ["ledger", "Party Ledger"], ["parties", "Parties"]];
 
   // ---- shared line-item editor (invoice / so / return) ----
-  const LineEditor = () => (
+  // showPricing=false for Sales Orders → hides Cost/Rate/Margin/Amount from sales reps.
+  // Called as a plain function ({LineEditor(...)}) so it doesn't remount on each keystroke.
+  const LineEditor = (showPricing) => (
     <>
       <div className="addpanel" style={{ margin: "0 18px 12px" }}>
         <div className="aprow">
@@ -835,7 +859,8 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
           <thead><tr>
             <th className="stick code">Code</th><th className="stick desc">Product</th>
             <th className="num">MRP</th><th>Case</th><th>Box</th><th>Pcs</th><th className="num">Tot Pcs</th>
-            <th className="num">Our Cost</th><th className="num">Rate</th><th className="num">Margin/Pc</th><th className="num">Amount</th><th></th>
+            {showPricing && <><th className="num">Our Cost</th><th className="num">Rate</th><th className="num">Margin/Pc</th><th className="num">Amount</th></>}
+            <th></th>
           </tr></thead>
           <tbody>
             {editing.items.map((it, idx) => (
@@ -847,19 +872,21 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
                 <td className="inp"><NumCell value={it.b} onChange={(v) => setLine(idx, "b", v)} /></td>
                 <td className="inp"><NumCell value={it.p} onChange={(v) => setLine(idx, "p", v)} /></td>
                 <td className="num">{linePcs(it)}</td>
-                <td className="num dim">{(it.cost || 0).toFixed(2)}</td>
-                <td className="inp"><DecCell value={it.rate} onChange={(v) => setLine(idx, "rate", v)} /></td>
-                <td className={"num " + (marginPc(it) < 0 ? "negtxt" : "oktxt")}>{marginPc(it).toFixed(2)}</td>
-                <td className="num">{inr(lineAmt(it))}</td>
+                {showPricing && <>
+                  <td className="num dim">{(it.cost || 0).toFixed(2)}</td>
+                  <td className="inp"><DecCell value={it.rate} onChange={(v) => setLine(idx, "rate", v)} /></td>
+                  <td className={"num " + (marginPc(it) < 0 ? "negtxt" : "oktxt")}>{marginPc(it).toFixed(2)}</td>
+                  <td className="num">{inr(lineAmt(it))}</td>
+                </>}
                 <td className="inp"><button className="unct del" onClick={() => delLine(idx)}>✕</button></td>
               </tr>
             ))}
-            {editing.items.length === 0 && <tr><td colSpan={12} className="dim" style={{ padding: 14 }}>Search above to add items. Rate auto-fills from each product's WS%; MRP, Our Cost and Margin are shown.</td></tr>}
+            {editing.items.length === 0 && <tr><td colSpan={showPricing ? 12 : 8} className="dim" style={{ padding: 14 }}>Search above to add items.{showPricing ? " Rate auto-fills from each product's WS%." : " Enter quantity per line."}</td></tr>}
           </tbody>
           {editing.items.length > 0 && <tfoot><tr className="trow">
             <td className="stick code">TOTAL</td><td className="stick desc">{editing.items.length} items</td>
             <td></td><td></td><td></td><td></td><td className="num">{editing.items.reduce((a, it) => a + linePcs(it), 0)}</td>
-            <td></td><td></td><td></td><td className="num">{inr(docTotal(editing))}</td><td></td>
+            {showPricing && <><td></td><td></td><td></td><td className="num">{inr(docTotal(editing))}</td></>}<td></td>
           </tr></tfoot>}
         </table>
       </div>
@@ -895,11 +922,12 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
             <button className="ghost2" onClick={() => setEditing(null)}>← Back</button>
             <div className="ptitle" style={{ margin: 0, fontSize: 14, color: "#2a2018", fontWeight: 700 }}>{editing.no} <span className="dim" style={{ fontWeight: 400 }}>· {editing.kind === "so" ? "Sales Order" : editing.kind === "return" ? "Return" : "Invoice"}</span></div>
             {editing.posted && <span className="oktxt" style={{ fontSize: 12 }}>✓ posted ({fmtDate(editing.date)})</span>}
+            {editing.kind === "invoice" && (() => { const paid = paidFor(editing.id); const bal = docTotal(editing) - paid; return <span style={{ fontSize: 12, color: "#5b4a3a" }}>Paid <b>{inr(paid)}</b> · Balance <b className={bal <= 0.01 ? "oktxt" : "exctxt"}>{inr(bal)}</b></span>; })()}
             <div className="spacer" />
-            <button className="ghost2" onClick={() => docPDF(editing, editing.kind === "so" ? "SALES ORDER" : editing.kind === "return" ? "RETURN NOTE" : "WHOLESALE INVOICE", editing.kind === "so" ? "SO" : editing.kind === "return" ? "Return" : "Invoice")}>📄 PDF</button>
+            <button className="ghost2" onClick={() => docPDF(editing, editing.kind === "so" ? "SALES ORDER" : editing.kind === "return" ? "RETURN NOTE" : "WHOLESALE INVOICE", editing.kind === "so" ? "SO" : editing.kind === "return" ? "Return" : "Invoice", editing.kind !== "so")}>📄 PDF</button>
             {isAdmin && <button className="unct del" onClick={() => editing.kind === "so" ? deleteSO(editing) : editing.kind === "return" ? deleteCnote(editing) : deleteInvoice(editing)}>🗑 Delete</button>}
           </div>
-          <LineEditor />
+          {LineEditor(editing.kind !== "so")}
           <div className="footbar">
             <div className="dim">
               {editing.kind === "invoice" && `Posting records a Wholesale stock-out on ${fmtDate(editing.date)} in ${editing.warehouse}.`}
@@ -928,8 +956,11 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
       {!editing && view === "invoices" && (
         <div className="report">
           <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Invoices — {wh}</div><div className="spacer" /><button className="save" onClick={newInvoice}>＋ New Invoice</button></div>
-          <ListTable rows={invoices} cols={["No.", "Party", "Date", "Items", "Total", "Status"]}
-            render={(inv) => [inv.no, partyName(inv.partyId), fmtDate(inv.date), inv.items.length, inr(docTotal(inv)), inv.posted ? <span className="oktxt">✓ posted</span> : <span className="dim">draft</span>]}
+          <ListTable rows={invoices} cols={["No.", "Party", "Date", "Total", "Paid", "Balance", "Status"]}
+            render={(inv) => { const paid = paidFor(inv.id); const bal = docTotal(inv) - paid; return [
+              inv.no, partyName(inv.partyId), fmtDate(inv.date), inr(docTotal(inv)), inr(paid),
+              <span className={bal <= 0.01 ? "oktxt" : (bal < docTotal(inv) ? "exctxt" : "")}>{inr(bal)}</span>,
+              <span className={bal <= 0.01 ? "oktxt" : "dim"}>{bal <= 0.01 ? "✓ paid" : paid > 0 ? "partial" : "unpaid"}{!inv.posted ? " · draft" : ""}</span>]; }}
             onOpen={(inv) => openDoc("invoice", inv)} onPDF={(inv) => docPDF(inv, "WHOLESALE INVOICE", "Invoice")} />
         </div>
       )}
@@ -938,25 +969,37 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
           <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Sales Orders — {wh}</div><div className="spacer" /><button className="save" onClick={newSO}>＋ New Sales Order</button></div>
           <ListTable rows={sos} cols={["No.", "Party", "Date", "Items", "Value", "Status"]}
             render={(so) => [so.no, partyName(so.partyId), fmtDate(so.date), so.items.length, inr(docTotal(so)), so.status === "invoiced" ? <span className="oktxt">invoiced</span> : <span className="dim">open</span>]}
-            onOpen={(so) => openDoc("so", so)} onPDF={(so) => docPDF(so, "SALES ORDER", "SO")} />
+            onOpen={(so) => openDoc("so", so)} onPDF={(so) => docPDF(so, "SALES ORDER", "SO", false)} />
         </div>
       )}
       {!editing && view === "payments" && (
         <div className="report">
-          <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Payments Received</div><div className="spacer" /><button className="save" onClick={() => setPayForm({ id: "pay_" + Date.now(), date: todayStr(), partyId: "", amount: "", mode: "Cash", note: "" })}>＋ Record Payment</button></div>
+          <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Payments Received</div><div className="spacer" /><button className="save" onClick={() => { setPayForm({ id: "pay_" + Date.now(), date: todayStr(), partyId: "", invoiceId: "", amount: "", mode: "Cash", note: "" }); setPayPending([]); }}>＋ Record Payment</button></div>
           {payForm && (
             <div className="addpanel"><div className="aprow">
               <label>Date<input type="date" value={payForm.date} onChange={(e) => setPayForm({ ...payForm, date: e.target.value })} style={{ width: 140 }} /></label>
-              <label className="wide">Party<select value={payForm.partyId} onChange={(e) => setPayForm({ ...payForm, partyId: e.target.value })} style={{ padding: "7px 9px", borderRadius: 6, border: "1px solid #d2c2a8", background: "#fffdf8" }}><option value="">— select —</option>{parties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
+              <label className="wide">Party<select value={payForm.partyId} onChange={(e) => { setPayForm({ ...payForm, partyId: e.target.value, invoiceId: "", amount: "" }); loadPending(e.target.value); }} style={{ padding: "7px 9px", borderRadius: 6, border: "1px solid #d2c2a8", background: "#fffdf8" }}><option value="">— select party —</option>{parties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
+              <label className="wide">Against Invoice (pending)
+                <select value={payForm.invoiceId} onChange={(e) => { const inv = payPending.find((i) => i.id === e.target.value); setPayForm({ ...payForm, invoiceId: e.target.value, amount: inv ? Math.round(inv._bal) : "" }); }} style={{ padding: "7px 9px", borderRadius: 6, border: "1px solid #d2c2a8", background: "#fffdf8" }}>
+                  <option value="">{payForm.partyId ? (payPending.length ? "— select invoice —" : "no pending invoices") : "select party first"}</option>
+                  {payPending.map((i) => <option key={i.id} value={i.id}>{i.no} · {i._w} · bal {inr(i._bal)}</option>)}
+                </select>
+              </label>
               <label>Amount<input value={payForm.amount} inputMode="decimal" onChange={(e) => setPayForm({ ...payForm, amount: e.target.value })} /></label>
               <label>Mode<input value={payForm.mode} onChange={(e) => setPayForm({ ...payForm, mode: e.target.value })} /></label>
-              <label className="wide">Note<input value={payForm.note} onChange={(e) => setPayForm({ ...payForm, note: e.target.value })} /></label>
-              <button className="save" onClick={() => { if (!payForm.partyId || !(Number(payForm.amount) > 0)) { alert("Pick party and amount."); return; } savePayments([...payments, { ...payForm, amount: Number(payForm.amount) }]); setPayForm(null); }}>Save</button>
-              <button className="ghost2" onClick={() => setPayForm(null)}>Cancel</button>
+              <button className="save" onClick={() => {
+                if (!payForm.invoiceId) { alert("Select a pending invoice."); return; }
+                const inv = payPending.find((i) => i.id === payForm.invoiceId);
+                const amt = Number(payForm.amount);
+                if (!(amt > 0)) { alert("Enter an amount."); return; }
+                if (inv && amt > inv._bal + 0.5) { alert(`Amount exceeds the invoice balance (${inr(inv._bal)}).`); return; }
+                savePayments([...payments, { ...payForm, amount: amt }]); setPayForm(null); setPayPending([]);
+              }}>Save</button>
+              <button className="ghost2" onClick={() => { setPayForm(null); setPayPending([]); }}>Cancel</button>
             </div></div>
           )}
-          <ListTable rows={payments} cols={["Date", "Party", "Amount", "Mode", "Note"]}
-            render={(x) => [fmtDate(x.date), partyName(x.partyId), inr(x.amount), x.mode, x.note]}
+          <ListTable rows={payments} cols={["Date", "Party", "Invoice", "Amount", "Mode"]}
+            render={(x) => [fmtDate(x.date), partyName(x.partyId), (invoices.find((i) => i.id === x.invoiceId)?.no) || x.invoiceId || "—", inr(x.amount), x.mode]}
             onDelete={isAdmin ? (x) => { if (window.confirm("Delete payment?")) savePayments(payments.filter((y) => y.id !== x.id)); } : null} />
         </div>
       )}
