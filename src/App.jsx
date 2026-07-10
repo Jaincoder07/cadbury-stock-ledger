@@ -727,13 +727,24 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
   // ---- SO actions ----
   const saveSO = async (so) => { const list = sos.slice(); const i = list.findIndex((x) => x.id === so.id); if (i >= 0) list[i] = so; else list.push(so); await saveSos(list); };
   const soToInvoice = async (so) => {
-    await saveSO({ ...so, status: "invoiced" });
-    // rebuild each line with fresh WS rate + cost (SO never exposed pricing)
+    setBusy(true);
+    try {
+      await saveSO({ ...so, status: "invoiced" });
+      // rebuild each line with fresh WS rate + cost (SO never exposed pricing)
+      const items = (so.items || []).map((it) => ({ ...it, rate: wsRate(prodByCode[it.code] || { mrp: it.mrp, code: it.code }), cost: costOf(it.code, it.mrp) }));
+      const inv = { kind: "invoice", id: "inv_" + Date.now(), no: nextNo(invoices, "INV"), date: todayStr(), partyId: so.partyId, warehouse: so.warehouse || wh, items, note: `From ${so.no}`, posted: null, soId: so.id };
+      const list = invoices.slice(); list.push(inv); await saveInvoices(list);
+      setView("invoices");
+      setEditing(inv);
+    } catch (e) { setDbErr("Create invoice failed: " + (e.message || e)); }
+    setBusy(false);
+  };
+  // pull an open SO's lines into the invoice being edited, and mark the SO invoiced
+  const loadSOIntoInvoice = (soId) => {
+    const so = sos.find((s) => s.id === soId); if (!so) return;
     const items = (so.items || []).map((it) => ({ ...it, rate: wsRate(prodByCode[it.code] || { mrp: it.mrp, code: it.code }), cost: costOf(it.code, it.mrp) }));
-    const inv = { kind: "invoice", id: "inv_" + Date.now(), no: nextNo(invoices, "INV"), date: todayStr(), partyId: so.partyId, warehouse: so.warehouse || wh, items, note: `From ${so.no}`, posted: null, soId: so.id };
-    const list = invoices.slice(); list.push(inv); await saveInvoices(list);
-    setView("invoices");
-    setEditing(inv);
+    setEditing((e) => ({ ...e, items: [...e.items, ...items], soId: soId, note: e.note || `From ${so.no}` }));
+    saveSO({ ...so, status: "invoiced" });
   };
   const deleteSO = async (so) => { if (!window.confirm(`Delete ${so.no}?`)) return; await saveSos(sos.filter((x) => x.id !== so.id)); setEditing(null); };
 
@@ -842,6 +853,16 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
               {parties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
           </label>
+          {editing.kind === "invoice" && editing.partyId && (
+            <label className="wide">From Sales Order
+              <select value="" onChange={(e) => { if (e.target.value) loadSOIntoInvoice(e.target.value); }} style={{ padding: "7px 9px", borderRadius: 6, border: "1px solid #d2c2a8", background: "#fffdf8" }}>
+                {(() => { const open = sos.filter((s) => s.partyId === editing.partyId && s.status !== "invoiced"); return <>
+                  <option value="">{open.length ? "— pull an open SO —" : "no open SOs for this party"}</option>
+                  {open.map((s) => <option key={s.id} value={s.id}>{s.no} · {s.items.length} items</option>)}
+                </>; })()}
+              </select>
+            </label>
+          )}
         </div>
       </div>
       <div className="toolbar" style={{ paddingTop: 0 }}>
