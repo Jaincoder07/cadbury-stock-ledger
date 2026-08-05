@@ -428,11 +428,12 @@ function UsersPanel({ usersMap, saveUsers, warehouses, myEmail }) {
                     <select value={u.role} disabled={self} onChange={(e) => setUser(em, { role: e.target.value })}
                       style={{ padding: "5px 8px", borderRadius: 6, border: "1px solid #d2c2a8", background: "#fffdf8" }}>
                       <option value="user">user</option>
+                      <option value="viewer">viewer (read-only)</option>
                       <option value="admin">admin</option>
                     </select>
                   </td>
                   <td>
-                    {u.role === "admin" ? <span className="dim">all warehouses</span> :
+                    {u.role === "admin" || u.role === "viewer" ? <span className="dim">all warehouses</span> :
                       warehouses.map((w) => (
                         <label key={w} className="zt" style={{ display: "inline-flex", marginRight: 14 }}>
                           <input type="checkbox" checked={(u.warehouses || []).includes(w)} onChange={() => toggleWh(em, w)} />
@@ -626,7 +627,8 @@ function ModulePicker({ onPick }) {
 }
 
 // ---------- wholesale invoicing module ----------
-function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAdmin, signOut, onSwitchModule }) {
+function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAdmin, readOnly, signOut, onSwitchModule }) {
+  const ro = readOnly;
   const [view, setView] = useState("invoices"); // invoices | so | payments | credit | ledger | parties
   const [parties, setParties] = useState([]);
   const [payments, setPayments] = useState([]);
@@ -853,7 +855,7 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
               {parties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
           </label>
-          {editing.kind === "invoice" && editing.partyId && (
+          {!ro && editing.kind === "invoice" && editing.partyId && (
             <label className="wide">From Sales Order
               <select value="" onChange={(e) => { if (e.target.value) loadSOIntoInvoice(e.target.value); }} style={{ padding: "7px 9px", borderRadius: 6, border: "1px solid #d2c2a8", background: "#fffdf8" }}>
                 {(() => { const open = sos.filter((s) => s.partyId === editing.partyId && s.status !== "invoiced"); return <>
@@ -956,16 +958,16 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
               {editing.kind === "so" && `Sales order — no stock impact until converted to an invoice.`}
             </div>
             <div style={{ display: "flex", gap: 10 }}>
-              {editing.kind === "invoice" && <>
+              {!ro && editing.kind === "invoice" && <>
                 <button className="ghost2" onClick={() => saveDraftInvoice(editing).then(() => alert("Saved."))} disabled={busy}>Save draft</button>
                 {editing.posted && <button className="ghost2" onClick={() => unpostInvoice(editing)} disabled={busy}>Reverse post</button>}
                 <button className="save" onClick={() => postInvoice(editing)} disabled={busy || !editing.partyId || editing.items.length === 0}>{busy ? "…" : editing.posted ? "Re-post" : "Post to stock (WS out)"}</button>
               </>}
-              {editing.kind === "so" && <>
+              {!ro && editing.kind === "so" && <>
                 <button className="ghost2" onClick={() => saveSO(editing).then(() => alert("Saved."))} disabled={busy}>Save</button>
                 <button className="save" onClick={() => soToInvoice(editing)} disabled={busy || !editing.partyId || editing.items.length === 0}>→ Create Invoice</button>
               </>}
-              {editing.kind === "return" && <>
+              {!ro && editing.kind === "return" && <>
                 <button className="ghost2" onClick={() => { saveDraftReturn(editing); alert("Saved."); }} disabled={busy}>Save draft</button>
                 <button className="save" onClick={() => postReturn(editing)} disabled={busy || !editing.partyId || editing.items.length === 0}>{busy ? "…" : editing.posted ? "Re-post" : "Post return (stock in via Edit)"}</button>
               </>}
@@ -976,7 +978,7 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
 
       {!editing && view === "invoices" && (
         <div className="report">
-          <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Invoices — {wh}</div><div className="spacer" /><button className="save" onClick={newInvoice}>＋ New Invoice</button></div>
+          <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Invoices — {wh}</div><div className="spacer" />{!ro && <button className="save" onClick={newInvoice}>＋ New Invoice</button>}</div>
           <ListTable rows={invoices} cols={["No.", "Party", "Date", "Total", "Paid", "Balance", "Status"]}
             render={(inv) => { const paid = paidFor(inv.id); const bal = docTotal(inv) - paid; return [
               inv.no, partyName(inv.partyId), fmtDate(inv.date), inr(docTotal(inv)), inr(paid),
@@ -987,7 +989,7 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
       )}
       {!editing && view === "so" && (
         <div className="report">
-          <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Sales Orders — {wh}</div><div className="spacer" /><button className="save" onClick={newSO}>＋ New Sales Order</button></div>
+          <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Sales Orders — {wh}</div><div className="spacer" />{!ro && <button className="save" onClick={newSO}>＋ New Sales Order</button>}</div>
           <ListTable rows={sos} cols={["No.", "Party", "Date", "Items", "Value", "Status"]}
             render={(so) => [so.no, partyName(so.partyId), fmtDate(so.date), so.items.length, inr(docTotal(so)), so.status === "invoiced" ? <span className="oktxt">invoiced</span> : <span className="dim">open</span>]}
             onOpen={(so) => openDoc("so", so)} onPDF={(so) => docPDF(so, "SALES ORDER", "SO", false)} />
@@ -995,7 +997,7 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
       )}
       {!editing && view === "payments" && (
         <div className="report">
-          <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Payments Received</div><div className="spacer" /><button className="save" onClick={() => { setPayForm({ id: "pay_" + Date.now(), date: todayStr(), partyId: "", invoiceId: "", amount: "", mode: "Cash", note: "" }); setPayPending([]); }}>＋ Record Payment</button></div>
+          <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Payments Received</div><div className="spacer" />{!ro && <button className="save" onClick={() => { setPayForm({ id: "pay_" + Date.now(), date: todayStr(), partyId: "", invoiceId: "", amount: "", mode: "Cash", note: "" }); setPayPending([]); }}>＋ Record Payment</button>}</div>
           {payForm && (
             <div className="addpanel"><div className="aprow">
               <label>Date<input type="date" value={payForm.date} onChange={(e) => setPayForm({ ...payForm, date: e.target.value })} style={{ width: 140 }} /></label>
@@ -1027,8 +1029,8 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
       {!editing && view === "credit" && (
         <div className="report">
           <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Credit Notes & Returns</div><div className="spacer" />
-            <button className="ghost2" onClick={() => setCreditForm({ id: "cn_" + Date.now(), no: nextNo(cnotes.filter((c) => c.type === "credit"), "CN"), date: todayStr(), partyId: "", type: "credit", amount: "", note: "" })}>＋ Credit Note</button>
-            <button className="save" onClick={newReturn}>＋ Return (stock back)</button>
+            {!ro && <><button className="ghost2" onClick={() => setCreditForm({ id: "cn_" + Date.now(), no: nextNo(cnotes.filter((c) => c.type === "credit"), "CN"), date: todayStr(), partyId: "", type: "credit", amount: "", note: "" })}>＋ Credit Note</button>
+            <button className="save" onClick={newReturn}>＋ Return (stock back)</button></>}
           </div>
           {creditForm && (
             <div className="addpanel"><div className="aprow">
@@ -1078,7 +1080,7 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
       )}
       {!editing && view === "parties" && (
         <div className="report">
-          <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Wholesalers / Parties</div><div className="spacer" /><button className="save" onClick={() => setPartyForm({ id: "pty_" + Date.now(), name: "", phone: "", opening: "" })}>＋ Add Party</button></div>
+          <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Wholesalers / Parties</div><div className="spacer" />{!ro && <button className="save" onClick={() => setPartyForm({ id: "pty_" + Date.now(), name: "", phone: "", opening: "" })}>＋ Add Party</button>}</div>
           {partyForm && (
             <div className="addpanel"><div className="aprow">
               <label className="wide">Name<input value={partyForm.name} onChange={(e) => setPartyForm({ ...partyForm, name: e.target.value })} /></label>
@@ -1287,10 +1289,11 @@ export default function App() {
   }, []);
   const myEmail = session?.user?.email?.toLowerCase() || null;
   const isAdmin = profile?.role === "admin";
+  const isViewer = profile?.role === "viewer";   // read-only: sees everything, changes nothing
   const signOut = () => supabase.auth.signOut();
   // once a day is saved it locks and no one edits it; only an admin can reopen it.
   // also blocked if the previous day was locked but its report hasn't been generated.
-  const canEdit = !locked && !prevBlocked;
+  const canEdit = !isViewer && !locked && !prevBlocked;
 
   // ---- load products + warehouses + config + users after login ----
   useEffect(() => {
@@ -1327,8 +1330,8 @@ export default function App() {
   // warehouses this user can see
   const allowedWh = useMemo(() => {
     if (!profile) return [];
-    return isAdmin ? warehouses : warehouses.filter((w) => (profile.warehouses || []).includes(w));
-  }, [profile, isAdmin, warehouses]);
+    return (isAdmin || isViewer) ? warehouses : warehouses.filter((w) => (profile.warehouses || []).includes(w));
+  }, [profile, isAdmin, isViewer, warehouses]);
 
   const saveUsers = (next) => { setUsersMap(next); kvSetBg(K_USERS, next); };
 
@@ -1975,11 +1978,11 @@ export default function App() {
   );
 
   // module selection: admin gets a picker on login; non-admins go straight to ledger for now
-  const effectiveModule = isAdmin ? moduleSel : "ledger";
-  if (isAdmin && !moduleSel) return <ModulePicker onPick={setModuleSel} />;
+  const effectiveModule = (isAdmin || isViewer) ? moduleSel : "ledger";
+  if ((isAdmin || isViewer) && !moduleSel) return <ModulePicker onPick={setModuleSel} />;
   if (effectiveModule === "invoicing") return (
     <InvoicingModule wh={wh} allowedWh={allowedWh} setWh={setWh} products={products} config={config}
-      myEmail={myEmail} isAdmin={isAdmin} signOut={signOut} onSwitchModule={() => setModuleSel(null)} />
+      myEmail={myEmail} isAdmin={isAdmin} readOnly={isViewer} signOut={signOut} onSwitchModule={() => setModuleSel(null)} />
   );
 
   const activeMv = MOVES.find((m) => m.key === activeMove);
@@ -2041,7 +2044,8 @@ export default function App() {
         {isAdmin && <button className={tab === "users" ? "tab on" : "tab"} onClick={() => setTab("users")}>Users</button>}
         <div className="spacer" />
         <button className="ghost2" style={{ marginRight: 8 }} onClick={exportAll} title="Download all tabs as one Excel file">⬇ Export</button>
-        {(tab === "entry" || tab === "stocktake") && (
+        {(tab === "entry" || tab === "stocktake") && isViewer && <span className="lockpill" style={{ padding: "8px 0" }}>👁 View only</span>}
+        {(tab === "entry" || tab === "stocktake") && !isViewer && (
           <div className="savebox">
             {locked
               ? <span className="lockpill" title={`Locked for ${fmtDate(date)}`}>🔒 Locked</span>
@@ -2597,7 +2601,7 @@ export default function App() {
             {Object.values(cfgSel).some((v) => v != null) && (
               <button className="ghost2" onClick={() => setCfgSel({})}>✕ Clear filters</button>
             )}
-            <button className="save" onClick={() => setShowAdd(!showAdd)}>{showAdd ? "✕ Close" : "＋ Add Product"}</button>
+            {!isViewer && <button className="save" onClick={() => setShowAdd(!showAdd)}>{showAdd ? "✕ Close" : "＋ Add Product"}</button>}
             {isAdmin && (
               <button className="ghost2" onClick={() => setShowUpload(!showUpload)}>
                 {showUpload ? "✕ Close upload" : "⬆ Upload Opening Stock"}
@@ -2705,9 +2709,9 @@ export default function App() {
                       <td className={"num closing " + (pr.profitR < 0 ? "negtxt" : "oktxt")}>{pr.profitR.toFixed(2)}</td>
                       <td className={"num closing " + (pr.profitW < 0 ? "negtxt" : "oktxt")}>{pr.profitW.toFixed(2)}</td>
                       <td className="inp" style={{ whiteSpace: "nowrap" }}>
-                        <button className={editing ? "unct edon" : "unct"} onClick={() => (editing ? setEditRow(null) : startEdit(p))}>
+                        {!isViewer && <button className={editing ? "unct edon" : "unct"} onClick={() => (editing ? setEditRow(null) : startEdit(p))}>
                           {editing ? "✓ Done" : "✎ Edit"}
-                        </button>
+                        </button>}
                         {isAdmin && editing && (
                           <button className="unct del" style={{ marginLeft: 6 }} onClick={() => deleteProduct(p)}>🗑 Delete</button>
                         )}
