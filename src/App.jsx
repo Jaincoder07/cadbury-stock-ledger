@@ -642,7 +642,6 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
   const [ledgerRows, setLedgerRows] = useState(null);
   const [payForm, setPayForm] = useState(null);    // add-payment form
   const [payPending, setPayPending] = useState([]); // pending invoices for the chosen party
-  const [creditForm, setCreditForm] = useState(null); // add credit-note form
   const [partyForm, setPartyForm] = useState(null);
   const [preview, setPreview] = useState(null);    // {doc, heading, prefix, showPricing}
   const [dbErr, setDbErr] = useState(null);
@@ -682,7 +681,8 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
 
   const newInvoice = () => setEditing({ kind: "invoice", id: "inv_" + Date.now(), no: nextNo(invoices, "INV"), date: todayStr(), partyId: "", warehouse: wh, items: [], note: "", posted: null, soId: null });
   const newSO = () => setEditing({ kind: "so", id: "so_" + Date.now(), no: nextNo(sos, "SO"), date: todayStr(), partyId: "", warehouse: wh, items: [], note: "", status: "open" });
-  const newReturn = () => setEditing({ kind: "return", id: "ret_" + Date.now(), no: nextNo(cnotes.filter((c) => c.type === "return"), "RET"), date: todayStr(), partyId: "", warehouse: wh, type: "return", items: [], note: "", posted: null });
+  // one item-wise credit note; "restock" decides whether it adds stock back via Edit/Cancel
+  const newReturn = () => setEditing({ kind: "return", id: "cn_" + Date.now(), no: nextNo(cnotes, "CN"), date: todayStr(), partyId: "", warehouse: wh, type: "return", restock: true, items: [], note: "", posted: null });
   const openDoc = (kind, doc) => setEditing({ kind, ...JSON.parse(JSON.stringify(doc)) });
 
   const addLine = (p) => { setEditing((e) => ({ ...e, items: [...e.items, { code: p.code, desc: p.desc, c: 0, b: 0, p: 0, rate: wsRate(p), cost: costOf(p.code, p.mrp), mrp: p.mrp, pcsCase: p.pcsCase, pcsOuter: p.pcsOuter }] })); setPickQuery(""); };
@@ -757,22 +757,28 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
   };
   const deleteSO = async (so) => { if (!window.confirm(`Delete ${so.no}?`)) return; await saveSos(sos.filter((x) => x.id !== so.id)); setEditing(null); };
 
-  // ---- return actions (post to Edit/Cancel = adds stock back, credits party) ----
+  // ---- credit note actions: always item-wise; restock=true also adds stock back ----
   const postReturn = async (ret) => {
     setBusy(true);
     try {
-      const locked = await kvGet(lockKey(ret.warehouse, ret.date));
-      if (locked && !isAdmin) { alert(`${fmtDate(ret.date)} is locked. Ask an admin to reopen it.`); setBusy(false); return; }
-      await postMovement(ret.warehouse, ret.date, "edit", ret.items, ret.posted?.items);
-      const updated = { ...ret, amount: docTotal(ret), posted: { at: new Date().toISOString(), by: myEmail, items: snapItems(ret.items) } };
+      if (ret.restock) {
+        const locked = await kvGet(lockKey(ret.warehouse, ret.date));
+        if (locked && !isAdmin) { alert(`${fmtDate(ret.date)} is locked. Ask an admin to reopen it.`); setBusy(false); return; }
+        await postMovement(ret.warehouse, ret.date, "edit", ret.items, ret.posted?.items);
+      } else if (ret.posted) {
+        await postMovement(ret.warehouse, ret.date, "edit", [], ret.posted.items); // was restocked before, now not
+      }
+      const updated = { ...ret, amount: docTotal(ret), posted: { at: new Date().toISOString(), by: myEmail, items: ret.restock ? snapItems(ret.items) : [] } };
       const list = cnotes.slice(); const i = list.findIndex((x) => x.id === ret.id); if (i >= 0) list[i] = updated; else list.push(updated);
       saveCnotes(list); setEditing(null);
-      alert(`Return ${ret.no} posted — stock added back via Edit/Cancel on ${fmtDate(ret.date)}.`);
+      alert(ret.restock
+        ? `Credit note ${ret.no} issued — stock added back via Edit/Cancel on ${fmtDate(ret.date)}.`
+        : `Credit note ${ret.no} issued — party credited, no stock change.`);
     } catch (e) { setDbErr("Post failed: " + (e.message || e)); }
     setBusy(false);
   };
   const saveDraftReturn = (ret) => { const list = cnotes.slice(); const upd = { ...ret, amount: docTotal(ret) }; const i = list.findIndex((x) => x.id === ret.id); if (i >= 0) list[i] = upd; else list.push(upd); saveCnotes(list); };
-  const deleteCnote = async (cn) => { if (!window.confirm(`Delete ${cn.no || "credit note"}?`)) return; if (cn.type === "return" && cn.posted) await postMovement(cn.warehouse, cn.date, "edit", [], cn.posted.items); saveCnotes(cnotes.filter((x) => x.id !== cn.id)); setEditing(null); };
+  const deleteCnote = async (cn) => { if (!window.confirm(`Delete ${cn.no || "credit note"}?`)) return; if (cn.posted?.items?.length) await postMovement(cn.warehouse, cn.date, "edit", [], cn.posted.items); saveCnotes(cnotes.filter((x) => x.id !== cn.id)); setEditing(null); };
 
   // ---- party ledger (across all warehouses) ----
   const buildLedger = async (pid) => {
@@ -785,7 +791,7 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
       if (p && Number(p.opening)) tx.push({ date: "0000-00-00", type: "Opening", ref: "", debit: p.opening > 0 ? p.opening : 0, credit: p.opening < 0 ? -p.opening : 0 });
       invAll.forEach((i) => tx.push({ date: i.date, type: "Invoice", ref: `${i.no} · ${i._w}`, debit: docTotal(i), credit: 0 }));
       payments.filter((x) => x.partyId === pid).forEach((x) => tx.push({ date: x.date, type: "Payment", ref: x.mode || "", debit: 0, credit: Number(x.amount) || 0 }));
-      cnotes.filter((x) => x.partyId === pid).forEach((x) => tx.push({ date: x.date, type: x.type === "return" ? "Return" : "Credit Note", ref: x.no || "", debit: 0, credit: x.type === "return" ? docTotal(x) : (Number(x.amount) || 0) }));
+      cnotes.filter((x) => x.partyId === pid).forEach((x) => tx.push({ date: x.date, type: "Credit Note", ref: x.no || "", debit: 0, credit: (x.items && x.items.length) ? docTotal(x) : (Number(x.amount) || 0) }));
       tx.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
       let bal = 0; tx.forEach((t) => { bal += t.debit - t.credit; t.balance = bal; });
       setLedgerRows(tx);
@@ -862,6 +868,12 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
               {parties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
           </label>
+          {editing.kind === "return" && (
+            <label style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 6, textTransform: "none", fontSize: 13, fontWeight: 600, color: "#2a2018", paddingBottom: 8 }}>
+              <input type="checkbox" checked={!!editing.restock} disabled={ro} onChange={(e) => setEditing({ ...editing, restock: e.target.checked })} />
+              Add stock back to {editing.warehouse}
+            </label>
+          )}
           {!ro && editing.kind === "invoice" && editing.partyId && (
             <label className="wide">From Sales Order
               <select value="" onChange={(e) => { if (e.target.value) loadSOIntoInvoice(e.target.value); }} style={{ padding: "7px 9px", borderRadius: 6, border: "1px solid #d2c2a8", background: "#fffdf8" }}>
@@ -962,7 +974,9 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
           <div className="footbar">
             <div className="dim">
               {editing.kind === "invoice" && `Posting records a Wholesale stock-out on ${fmtDate(editing.date)} in ${editing.warehouse}.`}
-              {editing.kind === "return" && `Posting adds stock back via Edit/Cancel on ${fmtDate(editing.date)} in ${editing.warehouse}, and credits the party.`}
+              {editing.kind === "return" && (editing.restock
+                ? `Issuing credits the party ${inr(docTotal(editing))} and adds stock back via Edit/Cancel on ${fmtDate(editing.date)} in ${editing.warehouse}.`
+                : `Issuing credits the party ${inr(docTotal(editing))}. No stock change (tick "Add stock back" if goods were returned).`)}
               {editing.kind === "so" && `Sales order — no stock impact until converted to an invoice.`}
             </div>
             <div style={{ display: "flex", gap: 10 }}>
@@ -977,7 +991,7 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
               </>}
               {!ro && editing.kind === "return" && <>
                 <button className="ghost2" onClick={() => { saveDraftReturn(editing); alert("Saved."); }} disabled={busy}>Save draft</button>
-                <button className="save" onClick={() => postReturn(editing)} disabled={busy || !editing.partyId || editing.items.length === 0}>{busy ? "…" : editing.posted ? "Re-post" : "Post return (stock in via Edit)"}</button>
+                <button className="save" onClick={() => postReturn(editing)} disabled={busy || !editing.partyId || editing.items.length === 0}>{busy ? "…" : editing.posted ? "Re-issue" : (editing.restock ? "Issue + add stock back" : "Issue credit note")}</button>
               </>}
             </div>
           </div>
@@ -1037,23 +1051,14 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
       {!editing && view === "credit" && (
         <div className="report">
           <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Credit Notes & Returns</div><div className="spacer" />
-            {!ro && <><button className="ghost2" onClick={() => setCreditForm({ id: "cn_" + Date.now(), no: nextNo(cnotes.filter((c) => c.type === "credit"), "CN"), date: todayStr(), partyId: "", type: "credit", amount: "", note: "" })}>＋ Credit Note</button>
-            <button className="save" onClick={newReturn}>＋ Return (stock back)</button></>}
+            {!ro && <button className="save" onClick={newReturn}>＋ New Credit Note</button>}
           </div>
-          {creditForm && (
-            <div className="addpanel"><div className="aprow">
-              <label>No.<input value={creditForm.no} onChange={(e) => setCreditForm({ ...creditForm, no: e.target.value })} /></label>
-              <label>Date<input type="date" value={creditForm.date} onChange={(e) => setCreditForm({ ...creditForm, date: e.target.value })} style={{ width: 140 }} /></label>
-              <label className="wide">Party<select value={creditForm.partyId} onChange={(e) => setCreditForm({ ...creditForm, partyId: e.target.value })} style={{ padding: "7px 9px", borderRadius: 6, border: "1px solid #d2c2a8", background: "#fffdf8" }}><option value="">— select —</option>{parties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
-              <label>Amount<input value={creditForm.amount} inputMode="decimal" onChange={(e) => setCreditForm({ ...creditForm, amount: e.target.value })} /></label>
-              <label className="wide">Reason<input value={creditForm.note} onChange={(e) => setCreditForm({ ...creditForm, note: e.target.value })} /></label>
-              <button className="save" onClick={() => { if (!creditForm.partyId || !(Number(creditForm.amount) > 0)) { alert("Pick party and amount."); return; } saveCnotes([...cnotes, { ...creditForm, amount: Number(creditForm.amount) }]); setCreditForm(null); }}>Save</button>
-              <button className="ghost2" onClick={() => setCreditForm(null)}>Cancel</button>
-            </div></div>
-          )}
-          <ListTable rows={cnotes} cols={["No.", "Party", "Date", "Type", "Amount", "Status"]}
-            render={(x) => [x.no, partyName(x.partyId), fmtDate(x.date), x.type === "return" ? "Return" : "Credit Note", inr(x.type === "return" ? docTotal(x) : x.amount), x.type === "return" ? (x.posted ? <span className="oktxt">✓ posted</span> : <span className="dim">draft</span>) : "—"]}
-            onOpen={(x) => x.type === "return" ? openDoc("return", x) : setCreditForm(x)} onDelete={isAdmin ? deleteCnote : null} />
+          <ListTable rows={cnotes} cols={["No.", "Party", "Date", "Items", "Amount", "Stock", "Status"]}
+            render={(x) => [x.no, partyName(x.partyId), fmtDate(x.date), (x.items || []).length,
+              inr(x.items ? docTotal(x) : (x.amount || 0)),
+              x.restock ? <span className="oktxt">added back</span> : <span className="dim">no change</span>,
+              x.posted ? <span className="oktxt">✓ issued</span> : <span className="dim">draft</span>]}
+            onOpen={(x) => openDoc("return", { ...x, items: x.items || [] })} onDelete={isAdmin ? deleteCnote : null} />
         </div>
       )}
       {!editing && view === "ledger" && (
@@ -1191,7 +1196,7 @@ function SalesRepMobile({ allowedWh, wh, setWh, products, config, myEmail, signO
   const [order, setOrder] = useState(null);
   const [q, setQ] = useState("");
   const [payParty, setPayParty] = useState(""); const [payPending, setPayPending] = useState([]); const [payInv, setPayInv] = useState(""); const [payAmt, setPayAmt] = useState(""); const [payMode, setPayMode] = useState("Cash");
-  const [cParty, setCParty] = useState(""); const [cAmt, setCAmt] = useState(""); const [cNote, setCNote] = useState("");
+  const [cParty, setCParty] = useState(""); const [cItems, setCItems] = useState([]); const [cNote, setCNote] = useState(""); const [cRestock, setCRestock] = useState(true); const [cq, setCq] = useState("");
   const [lParty, setLParty] = useState(""); const [lRows, setLRows] = useState(null);
 
   const partyName = (id) => parties.find((p) => p.id === id)?.name || "—";
@@ -1246,15 +1251,18 @@ function SalesRepMobile({ allowedWh, wh, setWh, products, config, myEmail, signO
   };
 
   // ---- credit note ----
+  // item-wise credit note; rep raises it as a draft for the office to issue
   const saveCredit = async () => {
-    if (!cParty) return flash("Select a party"); const amt = Number(cAmt); if (!(amt > 0)) return flash("Enter amount");
+    if (!cParty) return flash("Select a party");
+    if (!cItems.length || !cItems.some((it) => linePcs(it) > 0)) return flash("Add item quantities");
     setBusy(true);
     try {
       const list = (await kvGet(K_CNOTES)) || [];
-      const nums = list.filter((c) => c.type === "credit").map((i) => parseInt(String(i.no).replace(/\D/g, ""), 10) || 0);
+      const nums = list.map((i) => parseInt(String(i.no).replace(/\D/g, ""), 10) || 0);
       const no = "CN-" + String((nums.length ? Math.max(...nums) : 0) + 1).padStart(4, "0");
-      const next = [...list, { id: "cn_" + Date.now(), no, date: todayStr(), partyId: cParty, type: "credit", amount: amt, note: cNote, by: myEmail }];
-      await kvSet(K_CNOTES, next); setCnotes(next); flash(`Credit note ${no} saved ✓`); setCParty(""); setCAmt(""); setCNote(""); setView("home");
+      const items = cItems.filter((it) => linePcs(it) > 0).map((it) => ({ ...it, rate: 0 }));
+      const next = [...list, { id: "cn_" + Date.now(), no, date: todayStr(), partyId: cParty, warehouse: wh, type: "return", restock: cRestock, items, note: cNote, posted: null, by: myEmail }];
+      await kvSet(K_CNOTES, next); setCnotes(next); flash(`Credit note ${no} saved ✓`); setCParty(""); setCItems([]); setCNote(""); setView("home");
     } catch (e) { flash("Save failed"); }
     setBusy(false);
   };
@@ -1358,8 +1366,36 @@ function SalesRepMobile({ allowedWh, wh, setWh, products, config, myEmail, signO
           <div className="mvhead"><button className="mback" onClick={() => setView("home")}>←</button> Credit Note</div>
           <label className="mlab">Party</label>
           <PartySelect value={cParty} onChange={(e) => setCParty(e.target.value)} />
-          <label className="mlab">Amount</label>
-          <input className="mfield" inputMode="decimal" value={cAmt} onChange={(e) => setCAmt(e.target.value)} />
+          <label className="mlab">Add items being credited</label>
+          <input className="mfield" placeholder="Search product…" value={cq} onChange={(e) => setCq(e.target.value)} />
+          {cq.trim() && (
+            <div className="mfound">
+              {(products || []).filter((p) => p.desc.toLowerCase().includes(cq.trim().toLowerCase()) || p.code.toLowerCase().includes(cq.trim().toLowerCase())).slice(0, 10)
+                .map((p) => <div key={p.code} className="mfrow" onClick={() => { setCItems([...cItems, { code: p.code, desc: p.desc, c: 0, b: 0, p: 0, pcsCase: p.pcsCase, pcsOuter: p.pcsOuter, mrp: p.mrp }]); setCq(""); }}>＋ {p.desc} <small>MRP {p.mrp}</small></div>)}
+            </div>
+          )}
+          {cItems.map((it, i) => (
+            <div className="mitem" key={i}>
+              <div className="miname">{it.desc} <small>MRP {it.mrp}</small><button className="mx" onClick={() => setCItems(cItems.filter((_, x) => x !== i))}>✕</button></div>
+              <div className="mqty">
+                {[["c", "Case"], ["b", "Box"], ["p", "Pcs"]].map(([f, lbl]) => (
+                  <div className="mstep" key={f}><span>{lbl}</span>
+                    <div>
+                      <button onClick={() => setCItems(cItems.map((x, xi) => xi === i ? { ...x, [f]: Math.max(0, (x[f] || 0) - 1) } : x))}>−</button>
+                      <b>{it[f] || 0}</b>
+                      <button onClick={() => setCItems(cItems.map((x, xi) => xi === i ? { ...x, [f]: (x[f] || 0) + 1 } : x))}>＋</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="mtot">{linePcs(it)} pcs</div>
+            </div>
+          ))}
+          {cItems.length === 0 && <div className="mhint">Search above and tap a product to add it.</div>}
+          <label className="mlab">Goods returned?</label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 15, background: "#fff", border: "1px solid #d2c2a8", borderRadius: 10, padding: 13 }}>
+            <input type="checkbox" checked={cRestock} onChange={(e) => setCRestock(e.target.checked)} /> Yes — add stock back
+          </label>
           <label className="mlab">Reason</label>
           <input className="mfield" value={cNote} onChange={(e) => setCNote(e.target.value)} placeholder="e.g. damaged goods" />
           <button className="mbtn" disabled={busy} onClick={saveCredit}>{busy ? "Saving…" : "Save Credit Note"}</button>
