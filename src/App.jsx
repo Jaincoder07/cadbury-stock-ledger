@@ -429,6 +429,7 @@ function UsersPanel({ usersMap, saveUsers, warehouses, myEmail }) {
                       style={{ padding: "5px 8px", borderRadius: 6, border: "1px solid #d2c2a8", background: "#fffdf8" }}>
                       <option value="user">user</option>
                       <option value="viewer">viewer (read-only)</option>
+                      <option value="salesrep">salesrep (mobile)</option>
                       <option value="admin">admin</option>
                     </select>
                   </td>
@@ -1178,6 +1179,215 @@ function ListTable({ rows, cols, render, onOpen, onView, onPDF, onDelete }) {
   );
 }
 
+// ---------- sales-rep mobile app (orders, payments, credit notes, ledger) ----------
+function SalesRepMobile({ allowedWh, wh, setWh, products, config, myEmail, signOut }) {
+  const [view, setView] = useState("home");
+  const [parties, setParties] = useState([]);
+  const [payments, setPayments] = useState([]);
+  const [cnotes, setCnotes] = useState([]);
+  const [sos, setSos] = useState([]);
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [order, setOrder] = useState(null);
+  const [q, setQ] = useState("");
+  const [payParty, setPayParty] = useState(""); const [payPending, setPayPending] = useState([]); const [payInv, setPayInv] = useState(""); const [payAmt, setPayAmt] = useState(""); const [payMode, setPayMode] = useState("Cash");
+  const [cParty, setCParty] = useState(""); const [cAmt, setCAmt] = useState(""); const [cNote, setCNote] = useState("");
+  const [lParty, setLParty] = useState(""); const [lRows, setLRows] = useState(null);
+
+  const partyName = (id) => parties.find((p) => p.id === id)?.name || "—";
+  const linePcs = (it) => toPcs(it.c, it.b, it.p, it.pcsCase, it.pcsOuter);
+  const flash = (m) => { setMsg(m); setTimeout(() => setMsg(null), 2500); };
+
+  useEffect(() => { (async () => {
+    try { const [pa, pay, cn] = await Promise.all([kvGet(K_PARTIES), kvGet(K_PAYMENTS), kvGet(K_CNOTES)]); setParties(pa || []); setPayments(pay || []); setCnotes(cn || []); } catch (e) { flash("Load error"); }
+  })(); }, []);
+  useEffect(() => { if (!wh) return; (async () => { setSos((await kvGet(soKey(wh))) || []); })(); }, [wh]);
+
+  const dq = useDeferredValue(q);
+  const found = useMemo(() => { const s = dq.trim().toLowerCase(); if (!s) return []; return (products || []).filter((p) => p.desc.toLowerCase().includes(s) || p.code.toLowerCase().includes(s)).slice(0, 10); }, [dq, products]);
+
+  // ---- new sales order ----
+  const startOrder = () => { setOrder({ partyId: "", items: [] }); setQ(""); setView("order"); };
+  const addItem = (p) => { setOrder((o) => ({ ...o, items: [...o.items, { code: p.code, desc: p.desc, c: 0, b: 0, p: 0, pcsCase: p.pcsCase, pcsOuter: p.pcsOuter, mrp: p.mrp }] })); setQ(""); };
+  const setQty = (i, f, v) => setOrder((o) => { const items = o.items.slice(); items[i] = { ...items[i], [f]: Math.max(0, v) }; return { ...o, items }; });
+  const delItem = (i) => setOrder((o) => ({ ...o, items: o.items.filter((_, x) => x !== i) }));
+  const saveOrder = async () => {
+    if (!order.partyId) return flash("Select a party");
+    if (!order.items.length || !order.items.some((it) => linePcs(it) > 0)) return flash("Add item quantities");
+    setBusy(true);
+    try {
+      const list = (await kvGet(soKey(wh))) || [];
+      const nums = list.map((i) => parseInt(String(i.no).replace(/\D/g, ""), 10) || 0);
+      const no = "SO-" + String((nums.length ? Math.max(...nums) : 0) + 1).padStart(4, "0");
+      const so = { id: "so_" + Date.now(), no, date: todayStr(), partyId: order.partyId, warehouse: wh, items: order.items.filter((it) => linePcs(it) > 0), status: "open", by: myEmail };
+      const next = [...list, so]; await kvSet(soKey(wh), next); setSos(next);
+      flash(`Order ${no} saved ✓`); setView("home");
+    } catch (e) { flash("Save failed"); }
+    setBusy(false);
+  };
+
+  // ---- payment (against pending invoice) ----
+  const loadPending = async (pid) => {
+    if (!pid) { setPayPending([]); return; }
+    let list = [];
+    for (const w of allowedWh) { const inv = (await kvGet(invoicesKey(w))) || []; list = list.concat(inv.filter((i) => i.partyId === pid).map((i) => ({ ...i, _w: w }))); }
+    const paid = (id) => payments.filter((p) => p.invoiceId === id).reduce((a, p) => a + (Number(p.amount) || 0), 0);
+    const total = (i) => (i.items || []).reduce((a, it) => a + toPcs(it.c, it.b, it.p, it.pcsCase, it.pcsOuter) * (Number(it.rate) || 0), 0);
+    setPayPending(list.map((i) => ({ ...i, _bal: total(i) - paid(i.id) })).filter((i) => i._bal > 0.01));
+  };
+  const savePayment = async () => {
+    if (!payInv) return flash("Select an invoice");
+    const amt = Number(payAmt); if (!(amt > 0)) return flash("Enter amount");
+    const inv = payPending.find((i) => i.id === payInv);
+    if (inv && amt > inv._bal + 0.5) return flash("Amount exceeds balance");
+    setBusy(true);
+    try { const next = [...payments, { id: "pay_" + Date.now(), date: todayStr(), partyId: payParty, invoiceId: payInv, amount: amt, mode: payMode, by: myEmail }]; await kvSet(K_PAYMENTS, next); setPayments(next); flash("Payment recorded ✓"); setPayParty(""); setPayInv(""); setPayAmt(""); setPayPending([]); setView("home"); } catch (e) { flash("Save failed"); }
+    setBusy(false);
+  };
+
+  // ---- credit note ----
+  const saveCredit = async () => {
+    if (!cParty) return flash("Select a party"); const amt = Number(cAmt); if (!(amt > 0)) return flash("Enter amount");
+    setBusy(true);
+    try {
+      const list = (await kvGet(K_CNOTES)) || [];
+      const nums = list.filter((c) => c.type === "credit").map((i) => parseInt(String(i.no).replace(/\D/g, ""), 10) || 0);
+      const no = "CN-" + String((nums.length ? Math.max(...nums) : 0) + 1).padStart(4, "0");
+      const next = [...list, { id: "cn_" + Date.now(), no, date: todayStr(), partyId: cParty, type: "credit", amount: amt, note: cNote, by: myEmail }];
+      await kvSet(K_CNOTES, next); setCnotes(next); flash(`Credit note ${no} saved ✓`); setCParty(""); setCAmt(""); setCNote(""); setView("home");
+    } catch (e) { flash("Save failed"); }
+    setBusy(false);
+  };
+
+  // ---- party ledger ----
+  const buildLedger = async (pid) => {
+    setBusy(true); setLRows(null);
+    try {
+      let invAll = [];
+      for (const w of allowedWh) { const list = (await kvGet(invoicesKey(w))) || []; invAll = invAll.concat(list.filter((i) => i.partyId === pid)); }
+      const total = (i) => (i.items || []).reduce((a, it) => a + toPcs(it.c, it.b, it.p, it.pcsCase, it.pcsOuter) * (Number(it.rate) || 0), 0);
+      const tx = [];
+      const p = parties.find((x) => x.id === pid);
+      if (p && Number(p.opening)) tx.push({ date: "0000-00-00", type: "Opening", debit: p.opening > 0 ? p.opening : 0, credit: p.opening < 0 ? -p.opening : 0 });
+      invAll.forEach((i) => tx.push({ date: i.date, type: `Invoice ${i.no}`, debit: total(i), credit: 0 }));
+      payments.filter((x) => x.partyId === pid).forEach((x) => tx.push({ date: x.date, type: "Payment", debit: 0, credit: Number(x.amount) || 0 }));
+      cnotes.filter((x) => x.partyId === pid).forEach((x) => tx.push({ date: x.date, type: x.type === "return" ? "Return" : "Credit Note", debit: 0, credit: x.type === "return" ? total(x) : (Number(x.amount) || 0) }));
+      tx.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+      let bal = 0; tx.forEach((t) => { bal += t.debit - t.credit; t.balance = bal; });
+      setLRows(tx);
+    } catch (e) { flash("Load error"); }
+    setBusy(false);
+  };
+
+  const PartySelect = ({ value, onChange }) => (
+    <select className="mfield" value={value} onChange={onChange}>
+      <option value="">— select party —</option>
+      {parties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+    </select>
+  );
+
+  return (
+    <div className="mwrap">
+      <style>{CSS}</style>
+      <div className="mtop">
+        <div className="mbrand"><span className="mlogo">⚓</span> Anchor <span className="mrep">Sales</span></div>
+        <select className="mwh" value={wh} onChange={(e) => setWh(e.target.value)}>{allowedWh.map((w) => <option key={w}>{w}</option>)}</select>
+      </div>
+      {msg && <div className="mmsg">{msg}</div>}
+
+      {view === "home" && (
+        <div className="mhome">
+          <div className="mhi">Hi {myEmail.split("@")[0]} 👋</div>
+          <button className="mcard" onClick={startOrder}><span>🧾</span><b>New Sales Order</b><small>Take an order from a party</small></button>
+          <button className="mcard" onClick={() => setView("payment")}><span>💰</span><b>Collect Payment</b><small>Against a pending invoice</small></button>
+          <button className="mcard" onClick={() => setView("credit")}><span>📝</span><b>Credit Note</b><small>Record a credit to a party</small></button>
+          <button className="mcard" onClick={() => { setLParty(""); setLRows(null); setView("ledger"); }}><span>📊</span><b>Party Ledger</b><small>See outstanding & history</small></button>
+          <button className="mlink" onClick={signOut}>Sign out</button>
+        </div>
+      )}
+
+      {view === "order" && order && (
+        <div className="mview">
+          <div className="mvhead"><button className="mback" onClick={() => setView("home")}>←</button> New Sales Order</div>
+          <label className="mlab">Party</label>
+          <PartySelect value={order.partyId} onChange={(e) => setOrder({ ...order, partyId: e.target.value })} />
+          <label className="mlab">Add items</label>
+          <input className="mfield" placeholder="Search product…" value={q} onChange={(e) => setQ(e.target.value)} />
+          {found.length > 0 && (
+            <div className="mfound">{found.map((p) => <div key={p.code} className="mfrow" onClick={() => addItem(p)}>＋ {p.desc} <small>MRP {p.mrp}</small></div>)}</div>
+          )}
+          {order.items.map((it, i) => (
+            <div className="mitem" key={i}>
+              <div className="miname">{it.desc} <small>MRP {it.mrp}</small><button className="mx" onClick={() => delItem(i)}>✕</button></div>
+              <div className="mqty">
+                {[["c", "Case"], ["b", "Box"], ["p", "Pcs"]].map(([f, lbl]) => (
+                  <div className="mstep" key={f}>
+                    <span>{lbl}</span>
+                    <div><button onClick={() => setQty(i, f, (it[f] || 0) - 1)}>−</button><b>{it[f] || 0}</b><button onClick={() => setQty(i, f, (it[f] || 0) + 1)}>＋</button></div>
+                  </div>
+                ))}
+              </div>
+              <div className="mtot">{linePcs(it)} pcs</div>
+            </div>
+          ))}
+          {order.items.length === 0 && <div className="mhint">Search above and tap a product to add it.</div>}
+          <button className="mbtn" disabled={busy} onClick={saveOrder}>{busy ? "Saving…" : "Save Order"}</button>
+        </div>
+      )}
+
+      {view === "payment" && (
+        <div className="mview">
+          <div className="mvhead"><button className="mback" onClick={() => setView("home")}>←</button> Collect Payment</div>
+          <label className="mlab">Party</label>
+          <PartySelect value={payParty} onChange={(e) => { setPayParty(e.target.value); setPayInv(""); setPayAmt(""); loadPending(e.target.value); }} />
+          <label className="mlab">Pending invoice</label>
+          <select className="mfield" value={payInv} onChange={(e) => { setPayInv(e.target.value); const inv = payPending.find((i) => i.id === e.target.value); setPayAmt(inv ? Math.round(inv._bal) : ""); }}>
+            <option value="">{payParty ? (payPending.length ? "— select invoice —" : "no pending invoices") : "select party first"}</option>
+            {payPending.map((i) => <option key={i.id} value={i.id}>{i.no} · bal {inr(i._bal)}</option>)}
+          </select>
+          <label className="mlab">Amount</label>
+          <input className="mfield" inputMode="decimal" value={payAmt} onChange={(e) => setPayAmt(e.target.value)} />
+          <label className="mlab">Mode</label>
+          <select className="mfield" value={payMode} onChange={(e) => setPayMode(e.target.value)}><option>Cash</option><option>UPI</option><option>Cheque</option><option>Bank</option></select>
+          <button className="mbtn" disabled={busy} onClick={savePayment}>{busy ? "Saving…" : "Record Payment"}</button>
+        </div>
+      )}
+
+      {view === "credit" && (
+        <div className="mview">
+          <div className="mvhead"><button className="mback" onClick={() => setView("home")}>←</button> Credit Note</div>
+          <label className="mlab">Party</label>
+          <PartySelect value={cParty} onChange={(e) => setCParty(e.target.value)} />
+          <label className="mlab">Amount</label>
+          <input className="mfield" inputMode="decimal" value={cAmt} onChange={(e) => setCAmt(e.target.value)} />
+          <label className="mlab">Reason</label>
+          <input className="mfield" value={cNote} onChange={(e) => setCNote(e.target.value)} placeholder="e.g. damaged goods" />
+          <button className="mbtn" disabled={busy} onClick={saveCredit}>{busy ? "Saving…" : "Save Credit Note"}</button>
+        </div>
+      )}
+
+      {view === "ledger" && (
+        <div className="mview">
+          <div className="mvhead"><button className="mback" onClick={() => setView("home")}>←</button> Party Ledger</div>
+          <PartySelect value={lParty} onChange={(e) => { setLParty(e.target.value); if (e.target.value) buildLedger(e.target.value); else setLRows(null); }} />
+          {busy && <div className="mhint">Loading…</div>}
+          {lRows && (
+            <>
+              <div className="mbal">Balance: <b className={lRows.length && lRows[lRows.length - 1].balance > 0 ? "negtxt" : "oktxt"}>{inr(Math.abs(lRows.length ? lRows[lRows.length - 1].balance : 0))} {lRows.length && lRows[lRows.length - 1].balance >= 0 ? "Dr" : "Cr"}</b></div>
+              {lRows.slice().reverse().map((t, i) => (
+                <div className="mledrow" key={i}>
+                  <div><b>{t.type}</b><small>{t.date === "0000-00-00" ? "Opening" : fmtDate(t.date)}</small></div>
+                  <div className={t.debit ? "" : "oktxt"}>{t.debit ? inr(t.debit) : "− " + inr(t.credit)}</div>
+                </div>
+              ))}
+              {lRows.length === 0 && <div className="mhint">No transactions.</div>}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 export default function App() {
   const [products, setProducts] = useState(null);
   const [warehouses, setWarehouses] = useState(WAREHOUSES_DEFAULT);
@@ -1343,6 +1553,7 @@ export default function App() {
   const myEmail = session?.user?.email?.toLowerCase() || null;
   const isAdmin = profile?.role === "admin";
   const isViewer = profile?.role === "viewer";   // read-only: sees everything, changes nothing
+  const isRep = profile?.role === "salesrep";    // mobile sales-rep app only
   const signOut = () => supabase.auth.signOut();
   // once a day is saved it locks and no one edits it; only an admin can reopen it.
   // also blocked if the previous day was locked but its report hasn't been generated.
@@ -2031,6 +2242,9 @@ export default function App() {
   );
 
   // module selection: admin gets a picker on login; non-admins go straight to ledger for now
+  if (isRep) return (
+    <SalesRepMobile allowedWh={allowedWh} wh={wh} setWh={setWh} products={products} config={config} myEmail={myEmail} signOut={signOut} />
+  );
   const effectiveModule = (isAdmin || isViewer) ? moduleSel : "ledger";
   if ((isAdmin || isViewer) && !moduleSel) return <ModulePicker onPick={setModuleSel} />;
   if (effectiveModule === "invoicing") return (
@@ -3038,6 +3252,46 @@ const CSS = `
 .rv.sm { font-size:14px; font-weight:700; }
 
 .credit { text-align:center; font-size:11px; color:#9a8a72; padding:14px 18px 18px; letter-spacing:.4px; }
+/* ---- sales-rep mobile app ---- */
+.mwrap { max-width:460px; margin:0 auto; min-height:100vh; background:#f4efe6; font-family:'IBM Plex Sans',system-ui,sans-serif; color:#2a2018; padding-bottom:30px; }
+.mtop { display:flex; justify-content:space-between; align-items:center; background:#2a2018; color:#f4efe6; padding:14px 16px; position:sticky; top:0; z-index:5; }
+.mbrand { font-weight:800; letter-spacing:1px; font-size:16px; }
+.mlogo { color:#e0b3b6; }
+.mrep { font-size:11px; opacity:.7; font-weight:500; letter-spacing:2px; }
+.mwh { background:#3a2e22; border:1px solid #54442f; color:#f4efe6; border-radius:8px; padding:8px 10px; font-size:14px; max-width:150px; }
+.mmsg { background:#1b7f4d; color:#fff; text-align:center; padding:10px; font-size:14px; font-weight:600; }
+.mhome { padding:16px; display:flex; flex-direction:column; gap:12px; }
+.mhi { font-size:18px; font-weight:700; margin:6px 2px 4px; }
+.mcard { background:#fff; border:1px solid #d2c2a8; border-radius:14px; padding:18px 16px; text-align:left; display:grid; grid-template-columns:auto 1fr; grid-template-rows:auto auto; column-gap:14px; align-items:center; cursor:pointer; }
+.mcard span { grid-row:1/3; font-size:30px; }
+.mcard b { font-size:16px; }
+.mcard small { color:#6b5a45; font-size:12.5px; }
+.mlink { background:none; border:none; color:#6b5a45; text-decoration:underline; padding:14px; font-size:14px; cursor:pointer; }
+.mview { padding:16px; display:flex; flex-direction:column; gap:8px; }
+.mvhead { display:flex; align-items:center; gap:10px; font-size:18px; font-weight:700; margin-bottom:6px; }
+.mback { background:#e7dccb; border:none; border-radius:8px; width:38px; height:38px; font-size:18px; cursor:pointer; }
+.mlab { font-size:12px; text-transform:uppercase; letter-spacing:.6px; color:#6b5a45; font-weight:600; margin-top:8px; }
+.mfield { width:100%; border:1px solid #d2c2a8; border-radius:10px; padding:13px 12px; font-size:16px; background:#fff; }
+.mfound { background:#fff; border:1px solid #d2c2a8; border-radius:10px; overflow:hidden; }
+.mfrow { padding:13px 12px; border-bottom:1px solid #f0e8d8; font-size:15px; cursor:pointer; }
+.mfrow small { color:#9a8a72; font-size:12px; }
+.mitem { background:#fff; border:1px solid #d2c2a8; border-radius:12px; padding:12px; margin-top:6px; }
+.miname { font-weight:600; font-size:14px; display:flex; align-items:center; gap:6px; }
+.miname small { color:#9a8a72; font-weight:400; }
+.mx { margin-left:auto; background:none; border:none; color:#b3261e; font-size:16px; cursor:pointer; }
+.mqty { display:flex; gap:8px; margin-top:10px; }
+.mstep { flex:1; text-align:center; }
+.mstep span { font-size:11px; color:#6b5a45; }
+.mstep div { display:flex; align-items:center; justify-content:center; gap:6px; margin-top:3px; }
+.mstep button { width:34px; height:34px; border-radius:8px; border:1px solid #d2c2a8; background:#f4efe6; font-size:18px; cursor:pointer; }
+.mstep b { min-width:26px; font-size:16px; }
+.mtot { text-align:right; font-size:12px; color:#6b5a45; margin-top:8px; }
+.mhint { color:#9a8a72; font-size:13px; text-align:center; padding:14px; }
+.mbtn { background:#6b1f24; color:#fff; border:none; border-radius:12px; padding:16px; font-size:16px; font-weight:700; margin-top:16px; cursor:pointer; }
+.mbtn:disabled { opacity:.6; }
+.mbal { background:#fff; border:1px solid #d2c2a8; border-radius:10px; padding:12px; font-size:15px; margin:8px 0; }
+.mledrow { display:flex; justify-content:space-between; align-items:center; background:#fff; border:1px solid #e7dccb; border-radius:10px; padding:11px 12px; margin-top:6px; font-size:14px; }
+.mledrow small { display:block; color:#9a8a72; font-size:11.5px; }
 .ovl { position:fixed; inset:0; background:rgba(42,32,24,.55); z-index:200; display:flex; align-items:flex-start; justify-content:center; overflow:auto; padding:30px 16px; }
 .ovlcard { background:#efe9df; border-radius:12px; width:100%; max-width:800px; box-shadow:0 10px 40px rgba(0,0,0,.3); }
 .ovlbar { display:flex; justify-content:space-between; align-items:center; padding:12px 16px; border-bottom:1px solid #d2c2a8; font-size:14px; color:#2a2018; }
