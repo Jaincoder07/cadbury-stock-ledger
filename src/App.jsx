@@ -643,8 +643,13 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
   const [payPending, setPayPending] = useState([]); // pending invoices for the chosen party
   const [creditForm, setCreditForm] = useState(null); // add credit-note form
   const [partyForm, setPartyForm] = useState(null);
+  const [preview, setPreview] = useState(null);    // {doc, heading, prefix, showPricing}
   const [dbErr, setDbErr] = useState(null);
   const [busy, setBusy] = useState(false);
+  const openPreview = (doc, kind) => setPreview({ doc,
+    heading: kind === "so" ? "SALES ORDER" : kind === "return" ? "RETURN NOTE" : "WHOLESALE INVOICE",
+    prefix: kind === "so" ? "SO" : kind === "return" ? "Return" : "Invoice",
+    showPricing: kind !== "so" });
 
   const prodByCode = useMemo(() => { const m = {}; (products || []).forEach((p) => (m[p.code] = p)); return m; }, [products]);
   const costOf = (code, mrp) => skuPricing(mrp, config.perSku[code] || {}, config.ourMargin).cost;
@@ -948,7 +953,8 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
             {editing.posted && <span className="oktxt" style={{ fontSize: 12 }}>✓ posted ({fmtDate(editing.date)})</span>}
             {editing.kind === "invoice" && (() => { const paid = paidFor(editing.id); const bal = docTotal(editing) - paid; return <span style={{ fontSize: 12, color: "#5b4a3a" }}>Paid <b>{inr(paid)}</b> · Balance <b className={bal <= 0.01 ? "oktxt" : "exctxt"}>{inr(bal)}</b></span>; })()}
             <div className="spacer" />
-            <button className="ghost2" onClick={() => docPDF(editing, editing.kind === "so" ? "SALES ORDER" : editing.kind === "return" ? "RETURN NOTE" : "WHOLESALE INVOICE", editing.kind === "so" ? "SO" : editing.kind === "return" ? "Return" : "Invoice", editing.kind !== "so")}>📄 PDF</button>
+            <button className="ghost2" onClick={() => openPreview(editing, editing.kind)}>👁 View</button>
+            <button className="ghost2" onClick={() => docPDF(editing, editing.kind === "so" ? "SALES ORDER" : editing.kind === "return" ? "RETURN NOTE" : "WHOLESALE INVOICE", editing.kind === "so" ? "SO" : editing.kind === "return" ? "Return" : "Invoice", editing.kind !== "so")}>⬇ PDF</button>
             {isAdmin && <button className="unct del" onClick={() => editing.kind === "so" ? deleteSO(editing) : editing.kind === "return" ? deleteCnote(editing) : deleteInvoice(editing)}>🗑 Delete</button>}
           </div>
           {LineEditor(editing.kind !== "so")}
@@ -985,7 +991,7 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
               inv.no, partyName(inv.partyId), fmtDate(inv.date), inr(docTotal(inv)), inr(paid),
               <span className={bal <= 0.01 ? "oktxt" : (bal < docTotal(inv) ? "exctxt" : "")}>{inr(bal)}</span>,
               <span className={bal <= 0.01 ? "oktxt" : "dim"}>{bal <= 0.01 ? "✓ paid" : paid > 0 ? "partial" : "unpaid"}{!inv.posted ? " · draft" : ""}</span>]; }}
-            onOpen={(inv) => openDoc("invoice", inv)} onPDF={(inv) => docPDF(inv, "WHOLESALE INVOICE", "Invoice")} />
+            onOpen={(inv) => openDoc("invoice", inv)} onView={(inv) => openPreview(inv, "invoice")} onPDF={(inv) => docPDF(inv, "WHOLESALE INVOICE", "Invoice")} />
         </div>
       )}
       {!editing && view === "so" && (
@@ -993,7 +999,7 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
           <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Sales Orders — {wh}</div><div className="spacer" />{!ro && <button className="save" onClick={newSO}>＋ New Sales Order</button>}</div>
           <ListTable rows={sos} cols={["No.", "Party", "Date", "Items", "Value", "Status"]}
             render={(so) => [so.no, partyName(so.partyId), fmtDate(so.date), so.items.length, inr(docTotal(so)), so.status === "invoiced" ? <span className="oktxt">invoiced</span> : <span className="dim">open</span>]}
-            onOpen={(so) => openDoc("so", so)} onPDF={(so) => docPDF(so, "SALES ORDER", "SO", false)} />
+            onOpen={(so) => openDoc("so", so)} onView={(so) => openPreview(so, "so")} onPDF={(so) => docPDF(so, "SALES ORDER", "SO", false)} />
         </div>
       )}
       {!editing && view === "payments" && (
@@ -1097,13 +1103,58 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
         </div>
       )}
 
+      {preview && (() => { const d = preview.doc, sp = preview.showPricing; return (
+        <div className="ovl" onClick={() => setPreview(null)}>
+          <div className="ovlcard" onClick={(e) => e.stopPropagation()}>
+            <div className="ovlbar">
+              <b>{preview.heading} · {d.no}</b>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="save" onClick={() => docPDF(d, preview.heading, preview.prefix, sp)}>⬇ Download PDF</button>
+                <button className="ghost2" onClick={() => setPreview(null)}>✕ Close</button>
+              </div>
+            </div>
+            <div className="invsheet">
+              <div className="invhead">
+                <div>
+                  <div style={{ fontSize: 20, fontWeight: 800, color: "#6b1f24" }}>KWALITY VENTURES</div>
+                  <div style={{ fontSize: 12, color: "#6b5a45" }}>Mondelez Distribution</div>
+                  <div style={{ fontSize: 12, color: "#6b5a45" }}>Warehouse: {d.warehouse || wh}</div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontSize: 15, fontWeight: 700 }}>{preview.heading}</div>
+                  <div style={{ fontSize: 12, color: "#6b5a45" }}>No: {d.no}</div>
+                  <div style={{ fontSize: 12, color: "#6b5a45" }}>Date: {fmtDate(d.date)}</div>
+                </div>
+              </div>
+              <div style={{ margin: "10px 0", fontSize: 13 }}><b>Billed to:</b> {partyName(d.partyId)}</div>
+              <table className="invtable">
+                <thead><tr>
+                  <th>#</th><th style={{ textAlign: "left" }}>Product</th><th>MRP</th><th>C·B·P</th><th>Pcs</th>
+                  {sp && <><th>Rate</th><th>Amount</th></>}
+                </tr></thead>
+                <tbody>
+                  {(d.items || []).map((it, i) => (
+                    <tr key={i}>
+                      <td>{i + 1}</td><td style={{ textAlign: "left" }}>{it.desc}</td><td>{it.mrp}</td>
+                      <td>{it.c}·{it.b}·{it.p}</td><td>{linePcs(it)}</td>
+                      {sp && <><td>{(Number(it.rate) || 0).toFixed(2)}</td><td>{inr(lineAmt(it))}</td></>}
+                    </tr>
+                  ))}
+                </tbody>
+                {sp && <tfoot><tr><td colSpan={6} style={{ textAlign: "right", fontWeight: 800 }}>Total</td><td style={{ fontWeight: 800 }}>{inr(docTotal(d))}</td></tr></tfoot>}
+              </table>
+            </div>
+          </div>
+        </div>
+      ); })()}
+
       <div className="credit">An app by Jain Ankit and Co, Chartered Accountants</div>
     </div>
   );
 }
 
 // generic list table for the invoicing module
-function ListTable({ rows, cols, render, onOpen, onPDF, onDelete }) {
+function ListTable({ rows, cols, render, onOpen, onView, onPDF, onDelete }) {
   return (
     <div className="gridwrap" style={{ maxHeight: "none" }}>
       <table className="grid">
@@ -1114,7 +1165,8 @@ function ListTable({ rows, cols, render, onOpen, onPDF, onDelete }) {
               {render(r).map((cell, i) => <td key={i} className={i === 0 ? "stick code mono" : (i === 1 ? "stick desc" : "num")}>{cell}</td>)}
               <td className="inp" style={{ whiteSpace: "nowrap" }}>
                 {onOpen && <button className="unct" onClick={() => onOpen(r)}>Open</button>}
-                {onPDF && <button className="unct" style={{ marginLeft: 6 }} onClick={() => onPDF(r)}>📄</button>}
+                {onView && <button className="unct" style={{ marginLeft: 6 }} onClick={() => onView(r)}>👁 View</button>}
+                {onPDF && <button className="unct" style={{ marginLeft: 6 }} onClick={() => onPDF(r)}>⬇</button>}
                 {onDelete && <button className="unct del" style={{ marginLeft: 6 }} onClick={() => onDelete(r)}>✕</button>}
               </td>
             </tr>
@@ -2986,6 +3038,15 @@ const CSS = `
 .rv.sm { font-size:14px; font-weight:700; }
 
 .credit { text-align:center; font-size:11px; color:#9a8a72; padding:14px 18px 18px; letter-spacing:.4px; }
+.ovl { position:fixed; inset:0; background:rgba(42,32,24,.55); z-index:200; display:flex; align-items:flex-start; justify-content:center; overflow:auto; padding:30px 16px; }
+.ovlcard { background:#efe9df; border-radius:12px; width:100%; max-width:800px; box-shadow:0 10px 40px rgba(0,0,0,.3); }
+.ovlbar { display:flex; justify-content:space-between; align-items:center; padding:12px 16px; border-bottom:1px solid #d2c2a8; font-size:14px; color:#2a2018; }
+.invsheet { background:#fff; margin:16px; padding:24px; border-radius:8px; }
+.invhead { display:flex; justify-content:space-between; align-items:flex-start; border-bottom:2px solid #d2c2a8; padding-bottom:12px; }
+.invtable { width:100%; border-collapse:collapse; font-size:12.5px; margin-top:6px; }
+.invtable th, .invtable td { border:1px solid #e0d4bf; padding:6px 8px; text-align:right; }
+.invtable thead th { background:#efe6d6; color:#5b4a3a; }
+.invtable tfoot td { background:#faf6ee; }
 .modcard { background:#fff; border:1.5px solid #d2c2a8; border-radius:12px; padding:22px 20px; width:230px; cursor:pointer; text-align:center; transition:border-color .15s; }
 .modcard:hover { border-color:#6b1f24; background:#fffdf8; }
 .modicon { font-size:34px; margin-bottom:8px; }
