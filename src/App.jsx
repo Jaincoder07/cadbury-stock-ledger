@@ -1978,8 +1978,12 @@ export default function App() {
   );
 
   // module selection: admin gets a picker on login; non-admins go straight to ledger for now
-  // Wholesale Invoicing module temporarily disabled (incomplete) — app opens straight to the ledger.
-  // To re-enable: restore the ModulePicker/InvoicingModule branch and the "⇄ Modules" top-bar button.
+  const effectiveModule = (isAdmin || isViewer) ? moduleSel : "ledger";
+  if ((isAdmin || isViewer) && !moduleSel) return <ModulePicker onPick={setModuleSel} />;
+  if (effectiveModule === "invoicing") return (
+    <InvoicingModule wh={wh} allowedWh={allowedWh} setWh={setWh} products={products} config={config}
+      myEmail={myEmail} isAdmin={isAdmin} readOnly={isViewer} signOut={signOut} onSwitchModule={() => setModuleSel(null)} />
+  );
 
   const activeMv = MOVES.find((m) => m.key === activeMove);
 
@@ -2021,6 +2025,7 @@ export default function App() {
           <button className="ghost icon" onClick={() => setDate(addDays(date, +1))} title="Next day">›</button>
           {date !== todayStr() && <button className="ghost" onClick={() => setDate(todayStr())}>Today</button>}
           <span className="sep" />
+          {(isAdmin || isViewer) && <button className="ghost" onClick={() => setModuleSel(null)} title="Switch module">⇄ Modules</button>}
           <button className="ghost" onClick={signOut} title={`${myEmail} (${isAdmin ? "admin" : "user"}) — sign out`}>
             {myEmail.split("@")[0]} ⏻
           </button>
