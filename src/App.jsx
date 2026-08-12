@@ -646,6 +646,7 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
   const [dbErr, setDbErr] = useState(null);
   const [busy, setBusy] = useState(false);
 
+  const prodByCode = useMemo(() => { const m = {}; (products || []).forEach((p) => (m[p.code] = p)); return m; }, [products]);
   const costOf = (code, mrp) => skuPricing(mrp, config.perSku[code] || {}, config.ourMargin).cost;
   const wsRate = (p) => Math.round(p.mrp * (1 - (config.perSku[p.code]?.ws ?? SKU_DEFAULTS.ws) / 100) * 100) / 100;
   const partyName = (id) => parties.find((x) => x.id === id)?.name || "—";
