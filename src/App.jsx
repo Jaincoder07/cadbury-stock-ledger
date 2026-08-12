@@ -768,17 +768,30 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
       } else if (ret.posted) {
         await postMovement(ret.warehouse, ret.date, "edit", [], ret.posted.items); // was restocked before, now not
       }
-      const updated = { ...ret, amount: docTotal(ret), posted: { at: new Date().toISOString(), by: myEmail, items: ret.restock ? snapItems(ret.items) : [] } };
+      const stamp = { at: new Date().toISOString(), by: myEmail };
+      const updated = { ...ret, amount: docTotal(ret), approved: stamp, posted: { ...stamp, items: ret.restock ? snapItems(ret.items) : [] } };
       const list = cnotes.slice(); const i = list.findIndex((x) => x.id === ret.id); if (i >= 0) list[i] = updated; else list.push(updated);
       saveCnotes(list); setEditing(null);
       alert(ret.restock
-        ? `Credit note ${ret.no} issued — stock added back via Edit/Cancel on ${fmtDate(ret.date)}.`
-        : `Credit note ${ret.no} issued — party credited, no stock change.`);
+        ? `Credit note ${ret.no} approved — party credited and stock added back on ${fmtDate(ret.date)}.`
+        : `Credit note ${ret.no} approved — party credited, no stock change.`);
     } catch (e) { setDbErr("Post failed: " + (e.message || e)); }
     setBusy(false);
   };
   const saveDraftReturn = (ret) => { const list = cnotes.slice(); const upd = { ...ret, amount: docTotal(ret) }; const i = list.findIndex((x) => x.id === ret.id); if (i >= 0) list[i] = upd; else list.push(upd); saveCnotes(list); };
   const deleteCnote = async (cn) => { if (!window.confirm(`Delete ${cn.no || "credit note"}?`)) return; if (cn.posted?.items?.length) await postMovement(cn.warehouse, cn.date, "edit", [], cn.posted.items); saveCnotes(cnotes.filter((x) => x.id !== cn.id)); setEditing(null); };
+  // send an approved CN back to draft: reverse any stock and drop it from the ledger
+  const unapproveCN = async (cn) => {
+    if (!window.confirm(`Un-approve ${cn.no}? It returns to draft and is removed from the party ledger.`)) return;
+    setBusy(true);
+    try {
+      if (cn.posted?.items?.length) await postMovement(cn.warehouse, cn.date, "edit", [], cn.posted.items);
+      const upd = { ...cn, approved: null, posted: null };
+      const list = cnotes.slice(); const i = list.findIndex((x) => x.id === cn.id); if (i >= 0) list[i] = upd;
+      saveCnotes(list); setEditing((e) => e && { ...e, approved: null, posted: null });
+    } catch (e) { setDbErr("Un-approve failed: " + (e.message || e)); }
+    setBusy(false);
+  };
 
   // ---- party ledger (across all warehouses) ----
   const buildLedger = async (pid) => {
@@ -791,7 +804,8 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
       if (p && Number(p.opening)) tx.push({ date: "0000-00-00", type: "Opening", ref: "", debit: p.opening > 0 ? p.opening : 0, credit: p.opening < 0 ? -p.opening : 0 });
       invAll.forEach((i) => tx.push({ date: i.date, type: "Invoice", ref: `${i.no} · ${i._w}`, debit: docTotal(i), credit: 0 }));
       payments.filter((x) => x.partyId === pid).forEach((x) => tx.push({ date: x.date, type: "Payment", ref: x.mode || "", debit: 0, credit: Number(x.amount) || 0 }));
-      cnotes.filter((x) => x.partyId === pid).forEach((x) => tx.push({ date: x.date, type: "Credit Note", ref: x.no || "", debit: 0, credit: (x.items && x.items.length) ? docTotal(x) : (Number(x.amount) || 0) }));
+      // only APPROVED (issued) credit notes affect the ledger — drafts await accounts approval
+      cnotes.filter((x) => x.partyId === pid && (x.posted || x.approved)).forEach((x) => tx.push({ date: x.date, type: "Credit Note", ref: x.no || "", debit: 0, credit: (x.items && x.items.length) ? docTotal(x) : (Number(x.amount) || 0) }));
       tx.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
       let bal = 0; tx.forEach((t) => { bal += t.debit - t.credit; t.balance = bal; });
       setLedgerRows(tx);
@@ -963,7 +977,11 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
           <div className="toolbar">
             <button className="ghost2" onClick={() => setEditing(null)}>← Back</button>
             <div className="ptitle" style={{ margin: 0, fontSize: 14, color: "#2a2018", fontWeight: 700 }}>{editing.no} <span className="dim" style={{ fontWeight: 400 }}>· {editing.kind === "so" ? "Sales Order" : editing.kind === "return" ? "Return" : "Invoice"}</span></div>
-            {editing.posted && <span className="oktxt" style={{ fontSize: 12 }}>✓ posted ({fmtDate(editing.date)})</span>}
+            {editing.kind === "return"
+              ? (editing.approved
+                  ? <span className="oktxt" style={{ fontSize: 12 }}>✓ approved by {String(editing.approved.by || "").split("@")[0]}</span>
+                  : <span className="exctxt" style={{ fontSize: 12 }}>⏳ pending approval{editing.by ? ` · raised by ${String(editing.by).split("@")[0]}` : ""}</span>)
+              : (editing.posted && <span className="oktxt" style={{ fontSize: 12 }}>✓ posted ({fmtDate(editing.date)})</span>)}
             {editing.kind === "invoice" && (() => { const paid = paidFor(editing.id); const bal = docTotal(editing) - paid; return <span style={{ fontSize: 12, color: "#5b4a3a" }}>Paid <b>{inr(paid)}</b> · Balance <b className={bal <= 0.01 ? "oktxt" : "exctxt"}>{inr(bal)}</b></span>; })()}
             <div className="spacer" />
             <button className="ghost2" onClick={() => openPreview(editing, editing.kind)}>👁 View</button>
@@ -975,8 +993,8 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
             <div className="dim">
               {editing.kind === "invoice" && `Posting records a Wholesale stock-out on ${fmtDate(editing.date)} in ${editing.warehouse}.`}
               {editing.kind === "return" && (editing.restock
-                ? `Issuing credits the party ${inr(docTotal(editing))} and adds stock back via Edit/Cancel on ${fmtDate(editing.date)} in ${editing.warehouse}.`
-                : `Issuing credits the party ${inr(docTotal(editing))}. No stock change (tick "Add stock back" if goods were returned).`)}
+                ? `Approving credits the party ${inr(docTotal(editing))} and adds stock back via Edit/Cancel on ${fmtDate(editing.date)} in ${editing.warehouse}.`
+                : `Approving credits the party ${inr(docTotal(editing))}. No stock change (tick "Add stock back" if goods were returned).`)}
               {editing.kind === "so" && `Sales order — no stock impact until converted to an invoice.`}
             </div>
             <div style={{ display: "flex", gap: 10 }}>
@@ -991,7 +1009,8 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
               </>}
               {!ro && editing.kind === "return" && <>
                 <button className="ghost2" onClick={() => { saveDraftReturn(editing); alert("Saved."); }} disabled={busy}>Save draft</button>
-                <button className="save" onClick={() => postReturn(editing)} disabled={busy || !editing.partyId || editing.items.length === 0}>{busy ? "…" : editing.posted ? "Re-issue" : (editing.restock ? "Issue + add stock back" : "Issue credit note")}</button>
+                {editing.approved && <button className="ghost2" onClick={() => unapproveCN(editing)} disabled={busy}>Un-approve</button>}
+                <button className="save" onClick={() => postReturn(editing)} disabled={busy || !editing.partyId || editing.items.length === 0}>{busy ? "…" : editing.approved ? "Re-approve" : (editing.restock ? "Approve + add stock back" : "Approve credit note")}</button>
               </>}
             </div>
           </div>
@@ -1053,11 +1072,14 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
           <div className="toolbar"><div className="ptitle" style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "#2a2018" }}>Credit Notes & Returns</div><div className="spacer" />
             {!ro && <button className="save" onClick={newReturn}>＋ New Credit Note</button>}
           </div>
-          <ListTable rows={cnotes} cols={["No.", "Party", "Date", "Items", "Amount", "Stock", "Status"]}
-            render={(x) => [x.no, partyName(x.partyId), fmtDate(x.date), (x.items || []).length,
+          <div className="hint" style={{ paddingTop: 0 }}>
+            Credit notes raised by sales reps arrive as <b>drafts</b>. Accounts can edit lines, add or delete items, choose whether stock goes back, then <b>Approve</b> — only approved notes appear in the party ledger.
+          </div>
+          <ListTable rows={cnotes} cols={["No.", "Party", "Date", "Raised by", "Items", "Amount", "Stock", "Status"]}
+            render={(x) => [x.no, partyName(x.partyId), fmtDate(x.date), (x.by || "office").split("@")[0], (x.items || []).length,
               inr(x.items ? docTotal(x) : (x.amount || 0)),
               x.restock ? <span className="oktxt">added back</span> : <span className="dim">no change</span>,
-              x.posted ? <span className="oktxt">✓ issued</span> : <span className="dim">draft</span>]}
+              x.approved ? <span className="oktxt">✓ approved</span> : <span className="exctxt">⏳ pending</span>]}
             onOpen={(x) => openDoc("return", { ...x, items: x.items || [] })} onDelete={isAdmin ? deleteCnote : null} />
         </div>
       )}
@@ -1262,7 +1284,7 @@ function SalesRepMobile({ allowedWh, wh, setWh, products, config, myEmail, signO
       const no = "CN-" + String((nums.length ? Math.max(...nums) : 0) + 1).padStart(4, "0");
       const items = cItems.filter((it) => linePcs(it) > 0).map((it) => ({ ...it, rate: 0 }));
       const next = [...list, { id: "cn_" + Date.now(), no, date: todayStr(), partyId: cParty, warehouse: wh, type: "return", restock: cRestock, items, note: cNote, posted: null, by: myEmail }];
-      await kvSet(K_CNOTES, next); setCnotes(next); flash(`Credit note ${no} saved ✓`); setCParty(""); setCItems([]); setCNote(""); setView("home");
+      await kvSet(K_CNOTES, next); setCnotes(next); flash(`${no} sent for approval ✓`); setCParty(""); setCItems([]); setCNote(""); setView("home");
     } catch (e) { flash("Save failed"); }
     setBusy(false);
   };
@@ -1394,8 +1416,9 @@ function SalesRepMobile({ allowedWh, wh, setWh, products, config, myEmail, signO
           {cItems.length === 0 && <div className="mhint">Search above and tap a product to add it.</div>}
           <label className="mlab">Goods returned?</label>
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 15, background: "#fff", border: "1px solid #d2c2a8", borderRadius: 10, padding: 13 }}>
-            <input type="checkbox" checked={cRestock} onChange={(e) => setCRestock(e.target.checked)} /> Yes — add stock back
+            <input type="checkbox" checked={cRestock} onChange={(e) => setCRestock(e.target.checked)} /> Yes — goods came back
           </label>
+          <div className="mhint" style={{ textAlign: "left", padding: "4px 2px" }}>Accounts will review and approve this credit note.</div>
           <label className="mlab">Reason</label>
           <input className="mfield" value={cNote} onChange={(e) => setCNote(e.target.value)} placeholder="e.g. damaged goods" />
           <button className="mbtn" disabled={busy} onClick={saveCredit}>{busy ? "Saving…" : "Save Credit Note"}</button>
