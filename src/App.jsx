@@ -118,6 +118,9 @@ const K_PARTIES = "cad:parties";                          // wholesaler master (
 const K_PAYMENTS = "cad:payments";                        // payments received (global)
 const K_CNOTES = "cad:cnotes";                            // credit notes / returns (global)
 const REPORT_GATE_FROM = "2026-07-10"; // next-day report gating applies only from this date on
+// Modules still in testing. ON locally (VITE_ENABLE_WHOLESALE=true in .env.local),
+// OFF on the live Vercel build, so production only shows the Stock Ledger.
+const WHOLESALE_ENABLED = String(import.meta.env.VITE_ENABLE_WHOLESALE) === "true";
 
 // storage lives in Supabase (src/storage.js) — shared across all devices/users.
 
@@ -2354,11 +2357,21 @@ export default function App() {
   );
 
   // module selection: admin gets a picker on login; non-admins go straight to ledger for now
-  if (isRep) return (
+  if (isRep) return WHOLESALE_ENABLED ? (
     <SalesRepMobile allowedWh={allowedWh} wh={wh} setWh={setWh} products={products} config={config} myEmail={myEmail} signOut={signOut} />
+  ) : (
+    <div className="wrap" style={{ display: "grid", placeItems: "center", minHeight: "100vh" }}>
+      <style>{CSS}</style>
+      <div className="loginbox" style={{ textAlign: "center" }}>
+        <div className="title" style={{ color: "#2a2018" }}>Coming soon</div>
+        <p style={{ fontSize: 13, color: "#6b5a45" }}>The sales app isn't live yet. Please check back shortly.</p>
+        <button className="save" onClick={signOut}>Sign Out</button>
+      </div>
+    </div>
   );
-  const effectiveModule = (isAdmin || isViewer) ? moduleSel : "ledger";
-  if ((isAdmin || isViewer) && !moduleSel) return <ModulePicker onPick={setModuleSel} />;
+  const canSwitchModule = WHOLESALE_ENABLED && (isAdmin || isViewer);
+  const effectiveModule = canSwitchModule ? moduleSel : "ledger";
+  if (canSwitchModule && !moduleSel) return <ModulePicker onPick={setModuleSel} />;
   if (effectiveModule === "invoicing") return (
     <InvoicingModule wh={wh} allowedWh={allowedWh} setWh={setWh} products={products} config={config}
       myEmail={myEmail} isAdmin={isAdmin} readOnly={isViewer} signOut={signOut} onSwitchModule={() => setModuleSel(null)} />
@@ -2404,7 +2417,7 @@ export default function App() {
           <button className="ghost icon" onClick={() => setDate(addDays(date, +1))} title="Next day">›</button>
           {date !== todayStr() && <button className="ghost" onClick={() => setDate(todayStr())}>Today</button>}
           <span className="sep" />
-          {(isAdmin || isViewer) && <button className="ghost" onClick={() => setModuleSel(null)} title="Switch module">⇄ Modules</button>}
+          {canSwitchModule && <button className="ghost" onClick={() => setModuleSel(null)} title="Switch module">⇄ Modules</button>}
           <PasswordButton email={myEmail} />
           <button className="ghost" onClick={signOut} title={`${myEmail} (${isAdmin ? "admin" : "user"}) — sign out`}>
             {myEmail.split("@")[0]} ⏻
