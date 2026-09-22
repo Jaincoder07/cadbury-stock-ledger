@@ -600,6 +600,57 @@ function NumCell({ value, onChange, accent, disabled }) {
   );
 }
 
+// ---------- change password (self-contained button + dialog) ----------
+function PasswordButton({ email, className = "ghost", label = "🔑 Password" }) {
+  const [open, setOpen] = useState(false);
+  const [cur, setCur] = useState(""); const [p1, setP1] = useState(""); const [p2, setP2] = useState("");
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState(""); const [ok, setOk] = useState(false);
+  const close = () => { setOpen(false); setCur(""); setP1(""); setP2(""); setErr(""); setOk(false); };
+  const submit = async (e) => {
+    e.preventDefault(); setErr("");
+    if (p1.length < 6) return setErr("New password must be at least 6 characters.");
+    if (p1 !== p2) return setErr("New passwords don't match.");
+    setBusy(true);
+    // re-check the current password before allowing a change
+    const { error: e1 } = await supabase.auth.signInWithPassword({ email, password: cur });
+    if (e1) { setBusy(false); return setErr("Current password is incorrect."); }
+    const { error: e2 } = await supabase.auth.updateUser({ password: p1 });
+    setBusy(false);
+    if (e2) return setErr(e2.message);
+    setOk(true);
+  };
+  return (
+    <>
+      <button className={className} onClick={() => setOpen(true)} title="Change your password">{label}</button>
+      {open && (
+        <div className="ovl" style={{ alignItems: "center" }} onClick={close}>
+          <form className="loginbox" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+            <div className="title" style={{ textAlign: "center", color: "#2a2018", fontSize: 16 }}>CHANGE PASSWORD</div>
+            <div className="sub" style={{ textAlign: "center", color: "#6b5a45", marginBottom: 10 }}>{email}</div>
+            {ok ? (
+              <>
+                <div className="apwarn" style={{ color: "#1b7f4d", textAlign: "center" }}>✓ Password updated. Use it next time you sign in.</div>
+                <button type="button" className="save" style={{ width: "100%", marginTop: 14, padding: 11 }} onClick={close}>Done</button>
+              </>
+            ) : (
+              <>
+                <label>Current password<input type="password" value={cur} onChange={(e) => setCur(e.target.value)} autoFocus /></label>
+                <label>New password<input type="password" value={p1} onChange={(e) => setP1(e.target.value)} /></label>
+                <label>Confirm new password<input type="password" value={p2} onChange={(e) => setP2(e.target.value)} /></label>
+                {err && <div className="aperr">{err}</div>}
+                <button className="save" type="submit" disabled={busy || !cur || !p1 || !p2} style={{ width: "100%", marginTop: 14, padding: 11 }}>
+                  {busy ? "Updating…" : "Update Password"}
+                </button>
+                <button type="button" className="ghost2" style={{ width: "100%", marginTop: 8, padding: 10 }} onClick={close}>Cancel</button>
+              </>
+            )}
+          </form>
+        </div>
+      )}
+    </>
+  );
+}
+
 // ---------- module picker (shown on login) ----------
 function ModulePicker({ onPick }) {
   return (
@@ -962,6 +1013,7 @@ function InvoicingModule({ wh, allowedWh, setWh, products, config, myEmail, isAd
           <select className="whsel" value={wh} onChange={(e) => setWh(e.target.value)} title="Warehouse">{allowedWh.map((w) => <option key={w}>{w}</option>)}</select>
           <span className="sep" />
           <button className="ghost" onClick={onSwitchModule}>⇄ Modules</button>
+          <PasswordButton email={myEmail} />
           <button className="ghost" onClick={signOut}>{myEmail.split("@")[0]} ⏻</button>
         </div>
       </div>
@@ -1332,6 +1384,7 @@ function SalesRepMobile({ allowedWh, wh, setWh, products, config, myEmail, signO
           <button className="mcard" onClick={() => setView("payment")}><span>💰</span><b>Collect Payment</b><small>Against a pending invoice</small></button>
           <button className="mcard" onClick={() => setView("credit")}><span>📝</span><b>Credit Note</b><small>Record a credit to a party</small></button>
           <button className="mcard" onClick={() => { setLParty(""); setLRows(null); setView("ledger"); }}><span>📊</span><b>Party Ledger</b><small>See outstanding & history</small></button>
+          <PasswordButton email={myEmail} className="mlink" label="Change password" />
           <button className="mlink" onClick={signOut}>Sign out</button>
         </div>
       )}
@@ -2352,6 +2405,7 @@ export default function App() {
           {date !== todayStr() && <button className="ghost" onClick={() => setDate(todayStr())}>Today</button>}
           <span className="sep" />
           {(isAdmin || isViewer) && <button className="ghost" onClick={() => setModuleSel(null)} title="Switch module">⇄ Modules</button>}
+          <PasswordButton email={myEmail} />
           <button className="ghost" onClick={signOut} title={`${myEmail} (${isAdmin ? "admin" : "user"}) — sign out`}>
             {myEmail.split("@")[0]} ⏻
           </button>
